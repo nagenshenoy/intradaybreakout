@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Intraday Breakout Scanner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/design-tokens.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+</head>
+<body>
+
+<div id="header">
+  <div class="header-inner">
+    <div class="brand">
+      <div class="brand-title">Intraday Breakout Scanner</div>
+      <div class="brand-tagline">Bollinger Band breakouts with RSI, volume and weekly-level context</div>
+    </div>
+    <div class="header-meta">
+      <button class="btn btn-primary btn-sm" id="start-btn" type="button">Start scan</button>
+      <button class="btn btn-danger btn-sm" id="stop-btn" type="button" disabled>Stop scan</button>
+      <div class="live-pill" id="live-pill" title="Scanner status">
+        <span class="live-dot" id="live-dot"></span>
+        <span id="status-text">Connecting…</span>
+      </div>
+      <button class="theme-toggle" id="theme-btn" type="button">
+        <span id="theme-icon">🌙</span>
+        <div class="toggle-track"><div class="toggle-thumb"></div></div>
+        <span id="theme-label">Dark</span>
+      </button>
+    </div>
+  </div>
+  <div class="progress-row" id="progress-row" hidden>
+    <div class="progress-text">
+      <span class="progress-main" id="progress-main"></span>
+      <span class="progress-meta" id="progress-meta"></span>
+    </div>
+    <div class="progress-track" role="progressbar" id="progress-track" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- KPI strip -->
+  <div class="kpi-strip">
+    <div class="kpi-card"><div class="kpi-label">Symbols loaded</div><div class="kpi-value accent" id="kpi-symbols">0</div><div class="kpi-sub" id="kpi-file">No file selected</div></div>
+    <div class="kpi-card"><div class="kpi-label">Scans run</div><div class="kpi-value" id="kpi-scans">0</div><div class="kpi-sub" id="kpi-tabname">5 Minute tab</div></div>
+    <div class="kpi-card"><div class="kpi-label">Signals recorded</div><div class="kpi-value" id="kpi-total">0</div><div class="kpi-sub">all scans, this tab</div></div>
+    <div class="kpi-card"><div class="kpi-label">Above band</div><div class="kpi-value positive" id="kpi-above">0</div><div class="kpi-sub">after filters</div></div>
+    <div class="kpi-card"><div class="kpi-label">Below band</div><div class="kpi-value negative" id="kpi-below">0</div><div class="kpi-sub">after filters</div></div>
+    <div class="kpi-card"><div class="kpi-label">Fetch errors</div><div class="kpi-value" id="kpi-errors">0</div><div class="kpi-sub" id="kpi-lasterr">none</div></div>
+  </div>
+
+  <!-- Scan setup (collapsible) -->
+  <div class="panel collapsible" id="panel-setup" data-key="setup">
+    <button class="panel-header-bar panel-toggle" type="button" aria-expanded="true" aria-controls="setup-body">
+      <span class="pt-left"><span class="chev" aria-hidden="true">▾</span>Scan setup</span>
+      <span class="pt-right">
+        <span class="panel-note">Start / Stop are in the top bar; changes here apply from the next scan</span>
+        <span class="panel-summary" id="setup-summary"></span>
+      </span>
+    </button>
+    <div class="panel-body" id="setup-body">
+      <div class="controls-body">
+        <div class="ctl-group ctl-source">
+          <div class="ctl-title">Stock list</div>
+
+          <div class="src-row">
+            <label class="field"><span>Quick load watchlist</span>
+              <select id="qs-select" disabled><option>Loading…</option></select></label>
+            <button class="btn-outline" id="qs-load" type="button" disabled>Load</button>
+          </div>
+
+          <div class="src-row">
+            <input type="file" id="file-input" accept=".csv,.xlsx" hidden>
+            <button class="btn-outline" id="import-btn" type="button">Upload CSV / XLSX</button>
+            <span class="muted-note">or your own list; a header row is optional</span>
+          </div>
+
+          <div class="src-row" id="sheet-chooser" hidden>
+            <label class="field"><span id="sheet-label">Select sheet</span>
+              <select id="sheet-select"></select></label>
+            <button class="btn-outline" id="sheet-load" type="button">Load sheet</button>
+          </div>
+
+          <div class="ctl-note" id="import-label">No list loaded</div>
+        </div>
+
+        <div class="ctl-group">
+          <div class="ctl-title">Timeframes</div>
+          <label class="check"><input type="checkbox" id="cfg-5m" checked> 5 min scan</label>
+          <label class="check"><input type="checkbox" id="cfg-60m"> 60 min scan</label>
+        </div>
+
+        <div class="ctl-group ctl-fields">
+          <label class="field"><span>Lookback days</span>
+            <select id="cfg-lookback">{% for i in range(1, 11) %}<option value="{{ i }}" {{ 'selected' if i == 2 }}>{{ i }}</option>{% endfor %}</select></label>
+          <label class="field"><span>Scan interval (s)</span>
+            <input type="number" id="cfg-interval" value="60" min="5" max="3600" step="5"></label>
+          <label class="field" title="Parallel symbol fetches. 1 = sequential (safest for Yahoo rate limits)."><span>Parallel fetches</span>
+            <input type="number" id="cfg-workers" value="1" min="1" max="8"></label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Filters (collapsible) -->
+  <div class="panel collapsible filters" id="panel-filters" data-key="filters">
+    <button class="panel-header-bar panel-toggle" type="button" aria-expanded="true" aria-controls="filters-body">
+      <span class="pt-left"><span class="chev" aria-hidden="true">▾</span>Filters</span>
+      <span class="pt-right">
+        <span class="panel-note">Applied to the table, the KPIs and the export</span>
+        <span class="panel-summary" id="filters-summary"></span>
+      </span>
+    </button>
+    <div class="panel-body" id="filters-body">
+      <div class="filters-body">
+        <label class="field"><span>Symbol</span><input type="text" id="f-symbol" placeholder="e.g. TATA"></label>
+        <label class="field"><span>Band status</span>
+          <select id="f-band"><option>All</option><option>Above Band</option><option>Below Band</option></select></label>
+        <label class="field"><span>Change %</span>
+          <div class="inline">
+            <select id="f-change-op"><option value="none">No filter</option><option>=</option><option>&gt;</option><option>&lt;</option><option>&gt;=</option><option>&lt;=</option></select>
+            <input type="number" id="f-change-val" value="0" step="0.1" class="narrow">
+          </div></label>
+        <label class="field"><span>RSI</span>
+          <div class="inline">
+            <select id="f-rsi-op"><option value="none">No filter</option><option value="gt">Greater than</option><option value="lt">Less than</option></select>
+            <input type="number" id="f-rsi-val" value="50" step="1" class="narrow">
+          </div></label>
+        <div class="field"><span>Action type</span>
+          <details class="dropdown" id="action-dd">
+            <summary class="btn-outline" id="action-summary">All selected</summary>
+            <div class="dropdown-panel">
+              <div class="dropdown-tools"><button type="button" class="link-btn" id="act-all">All</button><button type="button" class="link-btn" id="act-none">None</button></div>
+              {% for a in action_types %}
+              <label class="check"><input type="checkbox" class="act-check" value="{{ a }}" checked> {{ a }}</label>
+              {% endfor %}
+            </div>
+          </details>
+        </div>
+        <label class="field" title="Today's average volume so far vs. the previous full trading day's average"><span>Rel Vol</span>
+          <div class="inline">
+            <select id="f-relvol-op"><option value="none">No filter</option><option value=">">&gt;</option><option value=">=">&gt;=</option><option value="<">&lt;</option><option value="<=">&lt;=</option><option value="=">=</option></select>
+            <input type="number" id="f-relvol-val" value="1" step="0.1" min="0" class="narrow">
+          </div></label>
+        <label class="field" title="Price beyond the previous week's high (Green) or low (Red)"><span>Week H/L</span>
+          <select id="f-week1"><option>All</option><option>Green</option><option>Red</option></select></label>
+        <label class="field" title="Price beyond the high (Green) or low (Red) from two weeks ago"><span>-2 Week H/L</span>
+          <select id="f-week2"><option>All</option><option>Green</option><option>Red</option></select></label>
+        <div class="field"><span>Scan # range</span>
+          <div class="inline">
+            <input type="number" id="f-from" placeholder="from" class="narrow" min="1">
+            <input type="number" id="f-to" placeholder="to" class="narrow" min="1">
+          </div></div>
+        <div class="filters-actions">
+          <button class="btn btn-primary" id="apply-btn" type="button">Apply filters</button>
+          <button class="btn-outline" id="reset-btn" type="button">Reset</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="pill-nav" id="tab-nav">
+    <button class="pill-tab active" data-tab="5m" type="button">5 Minute scan <span class="count" id="cnt-5m">0</span></button>
+    <button class="pill-tab" data-tab="60m" type="button">60 Minute scan <span class="count" id="cnt-60m">0</span></button>
+  </div>
+
+  <!-- Results table -->
+  <div class="panel">
+    <div class="panel-header-bar">
+      <span id="table-title">5 Minute results</span>
+      <span class="results-tools">
+        <span id="table-count" class="table-count">0 rows</span>
+        <button class="link-btn" id="expand-all-btn" type="button">Expand all</button>
+        <button class="link-btn" id="collapse-all-btn" type="button">Collapse all</button>
+        <button class="btn-outline btn-sm" id="clear-btn" type="button">Clear tab</button>
+        <button class="btn-outline btn-sm" id="export-btn" type="button">Export CSV</button>
+      </span>
+    </div>
+    <div class="data-table-scroll">
+      <table class="data-table" id="results-table">
+        <thead><tr id="thead-row"></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="empty">No signals yet. Load a stock list and start a scan; signals appear here as they are found.</div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  Data from Yahoo Finance via yfinance; it may be delayed and is not investment advice.<br>
+  Click a symbol to open it on TradingView, or click a row for details.
+</footer>
+
+<!-- Detail modal -->
+<div id="modal-overlay">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="m-symbol">
+    <div class="modal-header">
+      <div>
+        <div class="modal-symbol" id="m-symbol"></div>
+        <div class="modal-sub" id="m-sub"></div>
+      </div>
+      <div class="modal-right">
+        <div class="modal-price" id="m-price"></div>
+        <div id="m-change"></div>
+      </div>
+      <button class="modal-close" id="m-close" type="button" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body"><div class="metric-grid" id="m-grid"></div></div>
+    <div class="modal-footer">
+      <a class="btn-outline" id="m-link" target="_blank" rel="noopener">Open on TradingView</a>
+      <span class="muted-note">Esc to close</span>
+    </div>
+  </div>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>window.TAB_DEFS = {{ tabs | tojson }}; window.ACTION_TYPES = {{ action_types | tojson }};</script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

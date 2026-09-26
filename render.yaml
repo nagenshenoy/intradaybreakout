@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: intraday-breakout-scanner
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 --threads 8 --timeout 120 -b 0.0.0.0:$PORT app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: HOST
+        value: 0.0.0.0
+    autoDeploy: true
