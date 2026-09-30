@@ -329,10 +329,28 @@ EXPORT_COLUMNS = [
     ("Prev2WeekHigh", "Prev2WeekHigh"), ("Prev2WeekLow", "Prev2WeekLow"),
 ]
 
+# Export-time symbol formats. Symbols are stored internally as Yahoo Finance
+# tickers (e.g. "RELIANCE.NS"); these just reshape that string for CSV export.
+SYMBOL_FORMATS = ("ns", "plain", "nse")
 
-def results_to_csv(rows: list[dict]) -> str:
+
+def format_symbol(symbol: str, fmt: str = "ns") -> str:
+    """Reshape one symbol for export: 'ns' -> RELIANCE.NS (as stored), 'plain'
+    -> RELIANCE, 'nse' -> NSE:RELIANCE. Unrecognized formats fall back to 'ns'."""
+    s = str(symbol).strip()
+    plain = s[:-3] if s.upper().endswith(".NS") else s
+    if fmt == "plain":
+        return plain
+    if fmt == "nse":
+        return f"NSE:{plain}"
+    return f"{plain}.NS"
+
+
+def results_to_csv(rows: list[dict], symbol_format: str = "ns") -> str:
     df = pd.DataFrame(rows)
     df = df.reindex(columns=[k for k, _ in EXPORT_COLUMNS])
+    if "Symbol" in df.columns and not df.empty:
+        df["Symbol"] = df["Symbol"].apply(lambda s: format_symbol(s, symbol_format))
     df.columns = [label for _, label in EXPORT_COLUMNS]
     for col in ("LTP", "Change%", "RSI(14)", "RelVol", "Week1 %vsLevel", "Week2 %vsLevel",
                 "PrevWeekHigh", "PrevWeekLow", "Prev2WeekHigh", "Prev2WeekLow"):
@@ -562,3 +580,15 @@ class ScannerEngine:
         with self.lock:
             rows = list(self.tabs[tab_key].all_results)
         return filter_results(rows, f)
+
+    def scan_list(self, tab_key: str) -> list[dict]:
+        """Distinct Scan# values that actually have signals in this tab (for the
+        export dropdown), newest first, each with its scan time and signal count."""
+        with self.lock:
+            rows = list(self.tabs[tab_key].all_results)
+        agg: dict[int, dict] = {}
+        for r in rows:
+            n = r["Scan#"]
+            e = agg.setdefault(n, {"scan_no": n, "time": r["Time"], "count": 0})
+            e["count"] += 1
+        return sorted(agg.values(), key=lambda e: e["scan_no"], reverse=True)

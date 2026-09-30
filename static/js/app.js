@@ -17,6 +17,7 @@
     limit: 1000,
     scanning: false,
     collapsed: { '5m': new Set(), '60m': new Set() },   // per-tab collapsed Scan# groups
+    scanList: {},              // tab -> [{scan_no, time, count}], for the Export panel
   };
 
   // ------------------------------------------------------------ helpers
@@ -337,7 +338,7 @@
       const s = await api('/api/state');
       renderState(s);
       const v = s.tabs[S.tab].version;
-      if (S.filtersDirty || S.fetchedVersion[S.tab] !== v) await loadResults();
+      if (S.filtersDirty || S.fetchedVersion[S.tab] !== v) { await loadResults(); loadScanList(); }
     } catch (_) {
       const pill = $('#live-pill');
       pill.classList.remove('running'); pill.classList.add('offline');
@@ -391,10 +392,48 @@
     } catch (e) { toast(e.message, 'error'); }
   }
 
+  // ------------------------------------------------------------- export
+  // Independent of the Filters panel: exports either the whole tab or one
+  // Scan#, with the symbol written in the chosen format.
+  function renderScanSelect(scans) {
+    const sel = $('#exp-scanno');
+    const keep = sel.value;
+    if (!scans.length) {
+      sel.innerHTML = '<option value="">No scans yet</option>';
+      sel.disabled = true;
+    } else {
+      sel.disabled = false;
+      sel.innerHTML = scans.map(s =>
+        `<option value="${s.scan_no}">Scan #${s.scan_no} · ${esc(s.time)} · ${s.count} signal${s.count === 1 ? '' : 's'}</option>`
+      ).join('');
+      if (scans.some(s => String(s.scan_no) === keep)) sel.value = keep;
+    }
+    updateSummaries();
+  }
+
+  async function loadScanList() {
+    try {
+      const d = await api(`/api/scans?tab=${S.tab}`);
+      S.scanList = S.scanList || {};
+      S.scanList[S.tab] = d.scans;
+      renderScanSelect(d.scans);
+    } catch (_) { /* non-critical; leave the dropdown as-is */ }
+  }
+
   function exportTab() {
-    if (!S.rows.length) { toast('No (filtered) results in the active tab to export.', 'error'); return; }
-    const p = new URLSearchParams(appliedQuery || filterQuery());
-    p.set('tab', S.tab);
+    const scope = $('#exp-scope').value;
+    const fmt = $('#exp-format').value;
+    const list = (S.scanList && S.scanList[S.tab]) || [];
+    const p = new URLSearchParams({ tab: S.tab, symbol_format: fmt });
+    if (scope === 'scan') {
+      const scanNo = $('#exp-scanno').value;
+      if (!scanNo) { toast('No scans available to export yet.', 'error'); return; }
+      p.set('scan_from', scanNo);
+      p.set('scan_to', scanNo);
+    } else if (!list.reduce((a, e) => a + e.count, 0)) {
+      toast('No signals in this tab to export yet.', 'error');
+      return;
+    }
     window.location.href = `/api/export?${p}`;
   }
 
@@ -464,6 +503,7 @@
     S.filtersDirty = true;
     if (S.lastState) renderState(S.lastState);   // refresh KPIs for the new tab right away
     loadResults();
+    loadScanList();
   }
 
   // ------------------------------------------------------------- modal
@@ -522,6 +562,12 @@
   });
 
   $$('.pill-tab').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+
+  $('#exp-scope').addEventListener('change', () => {
+    $('#exp-scanno-field').hidden = $('#exp-scope').value !== 'scan';
+    updateSummaries();
+  });
+  $$('#export-body select').forEach(el => el.addEventListener('change', updateSummaries));
 
   $('#thead-row').addEventListener('click', e => {
     const th = e.target.closest('th');
@@ -586,6 +632,12 @@
       selectedActions().length !== ACTIONS.length && selectedActions().length !== 0,
     ].filter(Boolean).length;
     $('#filters-summary').textContent = active ? `${active} filter${active === 1 ? '' : 's'} active` : 'no filters active';
+
+    const scope = $('#exp-scope').value;
+    const scanNo = $('#exp-scanno').value;
+    const scopeLabel = scope === 'all' ? 'all data' : (scanNo ? `Scan #${scanNo}` : 'no scan selected');
+    const fmtLabel = { ns: '.NS suffix', plain: 'plain symbol', nse: 'NSE: prefix' }[$('#exp-format').value];
+    $('#export-summary').textContent = `${scopeLabel} · ${fmtLabel}`;
   }
   $$('#setup-body input, #setup-body select, .filters input, .filters select').forEach(el => {
     el.addEventListener('input', updateSummaries);
@@ -602,5 +654,6 @@
   updateActionSummary();
   updateSummaries();
   loadSources();
+  loadScanList();
   poll();
 })();

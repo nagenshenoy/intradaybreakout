@@ -27,10 +27,20 @@ Shortcuts that create a virtualenv and start the app for you: `run.bat` (Windows
 3. Watch the progress bar (**Scanning INFY.NS... 17/50**). Signals appear in the table the moment they are
    found, not at the end of the scan.
 4. Filter, sort (click a column header), click a row for details, click a symbol to open TradingView,
-   or **Export CSV** for the active tab.
+   or use the **Export** panel to download a CSV for the active tab.
 
-**Scan setup** and **Filters** are collapsible (click the panel title). When collapsed they show a one-line
-summary, and the open/closed state is remembered. Start/Stop stay in the sticky top bar either way.
+**Scan setup**, **Filters** and **Export** are collapsible (click the panel title). When collapsed they show
+a one-line summary, and the open/closed state is remembered. Start/Stop stay in the sticky top bar either way.
+
+### Export panel
+
+Independent of the Filters panel above the table — it doesn't apply Band/RSI/Change%/etc. filters, only the
+two choices below — so it always gives you a clean, complete CSV for whatever scope you pick:
+
+- **Scope**: **All data (this tab)**, or **Only one Scan#…** with a dropdown of every Scan# that has
+  signals, newest first, each labelled with its time and signal count.
+- **Symbol format**: **With `.NS` suffix** (`ITC.NS`, as stored internally), **Plain symbol** (`ITC`), or
+  **With `NSE:` prefix** (`NSE:ITC`) — handy for pasting straight into a TradingView or broker watchlist.
 
 To replace the bundled lists, overwrite `data/ScannerData.xlsx` (it is re-read automatically when the file
 changes) or point the `SCANNER_DATA` environment variable at another workbook.
@@ -138,7 +148,8 @@ sample_symbols.csv
 | POST | `/api/scan/stop` | Stop after the current symbol |
 | POST | `/api/clear` | JSON: `{"tab": "5m"}` |
 | GET | `/api/results` | Filtered rows, query: `tab, symbol, band, change_op, change_val, rsi_op, rsi_val, action_types, high_vol, week1, week2, scan_from, scan_to` |
-| GET | `/api/export` | Same query, returns CSV |
+| GET | `/api/scans` | Distinct Scan# values for a tab (`tab`), newest first, each with its time and signal count — powers the Export panel's Scan# dropdown |
+| GET | `/api/export` | Same query as `/api/results`, plus `symbol_format` (`ns` \| `plain` \| `nse`); returns CSV |
 
 ## Deploying on Render
 

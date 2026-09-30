@@ -165,6 +165,39 @@
     </div>
   </div>
 
+  <!-- Export (collapsible) -->
+  <div class="panel collapsible" id="panel-export" data-key="export">
+    <button class="panel-header-bar panel-toggle" type="button" aria-expanded="true" aria-controls="export-body">
+      <span class="pt-left"><span class="chev" aria-hidden="true">▾</span>Export</span>
+      <span class="pt-right">
+        <span class="panel-note">Downloads a CSV for the active tab, independent of the filters above</span>
+        <span class="panel-summary" id="export-summary"></span>
+      </span>
+    </button>
+    <div class="panel-body" id="export-body">
+      <div class="controls-body">
+        <div class="ctl-group ctl-fields">
+          <label class="field"><span>Scope</span>
+            <select id="exp-scope">
+              <option value="all">All data (this tab)</option>
+              <option value="scan">Only one Scan#…</option>
+            </select></label>
+          <label class="field" id="exp-scanno-field" hidden><span>Scan#</span>
+            <select id="exp-scanno"><option value="">No scans yet</option></select></label>
+          <label class="field" title="How symbols are written in the exported CSV"><span>Symbol format</span>
+            <select id="exp-format">
+              <option value="ns">With .NS suffix (ITC.NS)</option>
+              <option value="plain">Plain symbol (ITC)</option>
+              <option value="nse">With NSE: prefix (NSE:ITC)</option>
+            </select></label>
+        </div>
+        <div class="filters-actions">
+          <button class="btn btn-primary" id="export-btn" type="button">Export CSV</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Tabs -->
   <div class="pill-nav" id="tab-nav">
     <button class="pill-tab active" data-tab="5m" type="button">5 Minute scan <span class="count" id="cnt-5m">0</span></button>
@@ -180,7 +213,6 @@
         <button class="link-btn" id="expand-all-btn" type="button">Expand all</button>
         <button class="link-btn" id="collapse-all-btn" type="button">Collapse all</button>
         <button class="btn-outline btn-sm" id="clear-btn" type="button">Clear tab</button>
-        <button class="btn-outline btn-sm" id="export-btn" type="button">Export CSV</button>
       </span>
     </div>
     <div class="data-table-scroll">

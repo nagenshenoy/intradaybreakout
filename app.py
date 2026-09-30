@@ -14,7 +14,8 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request
 
-from scanner import ACTION_TYPES, TAB_DEFS, ScannerEngine, parse_filters, results_to_csv
+from scanner import (ACTION_TYPES, SYMBOL_FORMATS, TAB_DEFS, ScannerEngine, parse_filters,
+                     results_to_csv)
 from sources import BundledWorkbook, UploadStore, parse_csv, parse_workbook, sheet_summary
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -155,6 +156,13 @@ def create_app(engine: ScannerEngine | None = None, bundled_path: Path | None = 
             rows=rows_newest_first[:RESULT_LIMIT],
         )
 
+    @app.get("/api/scans")
+    def scans():
+        key = tab_or_400()
+        if not key:
+            return bad("Unknown tab.")
+        return jsonify(ok=True, tab=key, scans=eng.scan_list(key))
+
     @app.get("/api/export")
     def export():
         key = tab_or_400()
@@ -164,11 +172,14 @@ def create_app(engine: ScannerEngine | None = None, bundled_path: Path | None = 
             filters = parse_filters(request.args)
         except ValueError as e:
             return bad(str(e))
+        symbol_format = request.args.get("symbol_format") or "ns"
+        if symbol_format not in SYMBOL_FORMATS:
+            return bad(f"Unknown symbol_format. Use one of: {', '.join(SYMBOL_FORMATS)}.")
         rows = eng.query(key, filters)
         if not rows:
             return bad("No (filtered) results in this tab to export.", 404)
         fname = f"breakout_{key}_{dt.datetime.now():%Y%m%d_%H%M%S}.csv"
-        return Response(results_to_csv(rows), mimetype="text/csv",
+        return Response(results_to_csv(rows, symbol_format), mimetype="text/csv",
                         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
     return app
