@@ -170,16 +170,17 @@
     <button class="panel-header-bar panel-toggle" type="button" aria-expanded="true" aria-controls="export-body">
       <span class="pt-left"><span class="chev" aria-hidden="true">▾</span>Export</span>
       <span class="pt-right">
-        <span class="panel-note">Downloads a CSV for the active tab, independent of the filters above</span>
+        <span class="panel-note">Downloads a CSV for the active tab</span>
         <span class="panel-summary" id="export-summary"></span>
       </span>
     </button>
     <div class="panel-body" id="export-body">
       <div class="controls-body">
         <div class="ctl-group ctl-fields">
-          <label class="field"><span>Scope</span>
+          <label class="field" title="Honors the Filters panel above, exactly as currently shown in the table"><span>Scope</span>
             <select id="exp-scope">
-              <option value="all">All data (this tab)</option>
+              <option value="filtered">Filtered results (as shown in the table)</option>
+              <option value="all">All data (this tab, ignoring filters)</option>
               <option value="scan">Only one Scan#…</option>
             </select></label>
           <label class="field" id="exp-scanno-field" hidden><span>Scan#</span>

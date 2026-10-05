@@ -18,6 +18,7 @@
     scanning: false,
     collapsed: { '5m': new Set(), '60m': new Set() },   // per-tab collapsed Scan# groups
     scanList: {},              // tab -> [{scan_no, time, count}], for the Export panel
+    totalFiltered: 0,          // rows matching the current Filters panel query, this tab
   };
 
   // ------------------------------------------------------------ helpers
@@ -238,6 +239,7 @@
       $('#table-title').textContent = `${TAB_DEFS[S.tab].name} results`;
       const shown = d.rows.length;
       $('#table-count').textContent = `${d.total_filtered} of ${d.total_all} signals`;
+      S.totalFiltered = d.total_filtered;
       renderRows();
       document.getElementById('trunc')?.remove();
       if (d.total_filtered > shown) {
@@ -423,16 +425,26 @@
   function exportTab() {
     const scope = $('#exp-scope').value;
     const fmt = $('#exp-format').value;
-    const list = (S.scanList && S.scanList[S.tab]) || [];
-    const p = new URLSearchParams({ tab: S.tab, symbol_format: fmt });
-    if (scope === 'scan') {
-      const scanNo = $('#exp-scanno').value;
-      if (!scanNo) { toast('No scans available to export yet.', 'error'); return; }
-      p.set('scan_from', scanNo);
-      p.set('scan_to', scanNo);
-    } else if (!list.reduce((a, e) => a + e.count, 0)) {
-      toast('No signals in this tab to export yet.', 'error');
-      return;
+    let p;
+    if (scope === 'filtered') {
+      if (!S.totalFiltered) { toast('No filtered results in the active tab to export.', 'error'); return; }
+      p = new URLSearchParams(appliedQuery || filterQuery());   // the Filters panel's current query
+      p.set('tab', S.tab);
+      p.set('symbol_format', fmt);
+    } else {
+      p = new URLSearchParams({ tab: S.tab, symbol_format: fmt });
+      if (scope === 'scan') {
+        const scanNo = $('#exp-scanno').value;
+        if (!scanNo) { toast('No scans available to export yet.', 'error'); return; }
+        p.set('scan_from', scanNo);
+        p.set('scan_to', scanNo);
+      } else {
+        const list = (S.scanList && S.scanList[S.tab]) || [];
+        if (!list.reduce((a, e) => a + e.count, 0)) {
+          toast('No signals in this tab to export yet.', 'error');
+          return;
+        }
+      }
     }
     window.location.href = `/api/export?${p}`;
   }
@@ -635,7 +647,9 @@
 
     const scope = $('#exp-scope').value;
     const scanNo = $('#exp-scanno').value;
-    const scopeLabel = scope === 'all' ? 'all data' : (scanNo ? `Scan #${scanNo}` : 'no scan selected');
+    const scopeLabel = scope === 'filtered' ? 'filtered results'
+      : scope === 'all' ? 'all data'
+      : (scanNo ? `Scan #${scanNo}` : 'no scan selected');
     const fmtLabel = { ns: '.NS suffix', plain: 'plain symbol', nse: 'NSE: prefix' }[$('#exp-format').value];
     $('#export-summary').textContent = `${scopeLabel} · ${fmtLabel}`;
   }

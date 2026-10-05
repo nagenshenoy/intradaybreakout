@@ -497,7 +497,7 @@ class ScannerEngine:
     def _record_error(self, symbol: str, tab: str, msg: str):
         with self.lock:
             self.error_count += 1
-            self.errors.append({"time": dt.datetime.now().strftime("%H:%M:%S"),
+            self.errors.append({"time": self.now_fn().strftime("%H:%M:%S"),
                                 "symbol": symbol, "tab": tab, "error": msg})
 
     def _record_match(self, tab: ScanTab, scan_no: int, scan_time: str, stock: dict):
@@ -524,7 +524,7 @@ class ScannerEngine:
             total = len(symbols)
             self.progress = {**_idle_progress(), "phase": "scanning", "tab": tab.key,
                              "tab_name": tab.name, "scan_no": scan_no, "total": total}
-        scan_time = dt.datetime.now().strftime("%H:%M:%S")
+        scan_time = self.now_fn().strftime("%H:%M:%S")
 
         def work(symbol: str):
             if self._stop.is_set():

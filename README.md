@@ -34,11 +34,13 @@ a one-line summary, and the open/closed state is remembered. Start/Stop stay in 
 
 ### Export panel
 
-Independent of the Filters panel above the table — it doesn't apply Band/RSI/Change%/etc. filters, only the
-two choices below — so it always gives you a clean, complete CSV for whatever scope you pick:
-
-- **Scope**: **All data (this tab)**, or **Only one Scan#…** with a dropdown of every Scan# that has
-  signals, newest first, each labelled with its time and signal count.
+- **Scope**:
+  - **Filtered results (as shown in the table)** — exactly what the Filters panel and the active tab are
+    currently showing.
+  - **All data (this tab, ignoring filters)** — every signal recorded in the active tab, regardless of the
+    Filters panel.
+  - **Only one Scan#…** — a dropdown of every Scan# that has signals, newest first, each labelled with its
+    time and signal count; ignores the Filters panel too.
 - **Symbol format**: **With `.NS` suffix** (`ITC.NS`, as stored internally), **Plain symbol** (`ITC`), or
   **With `NSE:` prefix** (`NSE:ITC`) — handy for pasting straight into a TradingView or broker watchlist.
 
@@ -104,6 +106,9 @@ Only a scan that was actually **started before** 3:25 PM IST is subject to this 
 scan at any other time of day (evening testing, a different timezone, catching up on a Sunday, ...)
 scans normally with no auto-stop at all - it's a stop trigger for a scan that's already running, not
 a block on ever starting one outside that window.
+
+The **Time** column (and the Fetch errors timestamps) are also always IST, regardless of which timezone
+the server itself is running in - useful since most hosting platforms (including Render) run servers in UTC.
 
 ## Small differences from the original
 
