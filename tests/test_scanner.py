@@ -71,6 +71,8 @@ def make_fetcher(moves, vol_mults=None):
         if symbol == "BROKEN.NS":
             raise RuntimeError("yahoo said no")
         mult = vol_mults.get(symbol, 1.0)
+        if interval == "1m":
+            return intraday(per_day=375, freq="1min", last_move=moves.get(symbol, 0.0), today_vol_mult=mult)
         if interval == "5m":
             return intraday(last_move=moves.get(symbol, 0.0), today_vol_mult=mult)
         if interval == "60m":
@@ -219,7 +221,7 @@ def test_auto_stop_lets_the_in_progress_scan_finish():
     # (First "before" is consumed by start()'s arming check.)
     before = dt.datetime(2026, 1, 5, 15, 20, tzinfo=IST)
     after = dt.datetime(2026, 1, 5, 15, 26, tzinfo=IST)
-    eng = ScannerEngine(fetcher=make_fetcher({}), now_fn=_clock(before, before, after))
+    eng = ScannerEngine(fetcher=make_fetcher({"AAA.NS": 2.0, "BBB.NS": 2.0}), now_fn=_clock(before, before, after))
     eng.set_symbols(["AAA.NS", "BBB.NS"])
     ok, _ = eng.start({"scan_5m": True, "scan_60m": True, "scan_interval": 5})
     assert ok
@@ -232,7 +234,7 @@ def test_auto_stop_lets_the_in_progress_scan_finish():
 
 def test_no_auto_stop_before_cutoff():
     before = dt.datetime(2026, 1, 5, 11, 0, tzinfo=IST)
-    eng = ScannerEngine(fetcher=make_fetcher({}), now_fn=_clock(before))
+    eng = ScannerEngine(fetcher=make_fetcher({"AAA.NS": 2.0}), now_fn=_clock(before))
     eng.set_symbols(["AAA.NS"])
     eng.start({"scan_5m": True, "scan_interval": 5})
     assert wait_until(lambda: eng.tabs["5m"].scan_count >= 1)
@@ -250,7 +252,7 @@ def test_starting_after_cutoff_scans_normally_and_never_auto_stops():
     The auto-stop only applies to a scan that was already running before the cutoff.
     """
     after = dt.datetime(2026, 1, 5, 21, 26, tzinfo=IST)
-    eng = ScannerEngine(fetcher=make_fetcher({}), now_fn=_clock(after))
+    eng = ScannerEngine(fetcher=make_fetcher({"AAA.NS": 2.0, "BBB.NS": 2.0}), now_fn=_clock(after))
     eng.set_symbols(["AAA.NS", "BBB.NS"])
     ok, _ = eng.start({"scan_5m": True, "scan_60m": True, "scan_interval": 5})
     assert ok
@@ -269,7 +271,7 @@ def test_update_config_applies_from_the_next_scan_pass():
     wait interval) picks up the new settings and scans 60m instead of 5m.
     """
     gate = threading.Event()
-    base = make_fetcher({})
+    base = make_fetcher({"SLOW.NS": 2.0})
 
     def fetch(symbol, period, interval, **kw):
         if symbol == "SLOW.NS" and interval == "5m":
@@ -281,7 +283,7 @@ def test_update_config_applies_from_the_next_scan_pass():
     assert eng.start({"scan_5m": True, "scan_60m": False, "scan_interval": 5})[0]
     try:
         assert wait_until(lambda: eng.snapshot()["progress"]["symbol"] == "SLOW.NS")
-        assert eng.tabs["5m"].scan_count == 1        # the in-flight pass has already started
+        assert eng.snapshot()["progress"]["tab"] == "5m"   # the in-flight pass has already started
         ok, msg = eng.update_config({"scan_5m": False, "scan_60m": True, "scan_interval": 5})
         assert ok and "next scan" in msg
         assert eng.tabs["60m"].scan_count == 0        # next pass hasn't started yet - unaffected so far
@@ -451,3 +453,201 @@ def test_progress_and_results_appear_while_scanning():
     eng.stop()
     assert wait_until(lambda: not eng.scanning)
     assert eng.snapshot()["progress"]["phase"] == "idle"
+
+
+# ------------------------------------------------- lookback = 0 (bands only) ----
+CFG0 = ScanConfig(lookback_days=0)
+
+
+def test_lookback_zero_is_accepted_and_not_clamped():
+    assert ScanConfig.from_dict({"lookback_days": 0}).lookback_days == 0
+    assert ScanConfig.from_dict({"lookback_days": "0"}).lookback_days == 0   # the UI sends strings
+    assert ScanConfig.from_dict({"lookback_days": -3}).lookback_days == 0    # below range -> 0
+    assert ScanConfig.from_dict({"lookback_days": 99}).lookback_days == 10
+    assert ScanConfig.from_dict({}).lookback_days == 2                       # default unchanged
+    eng = ScannerEngine(fetcher=make_fetcher({}))
+    ok, _ = eng.update_config({"lookback_days": 0})
+    assert ok and eng.config.lookback_days == 0
+
+
+@pytest.mark.parametrize("key,kw", [
+    ("5m", dict()),
+    ("60m", dict(n_days=20, per_day=7, freq="60min")),
+])
+def test_lookback_zero_is_pure_band_check(key, kw):
+    tab = ScanTab(key)
+    col = lambda df, c: df.columns.get_loc(c)  # noqa: E731
+
+    # A huge earlier high (today or before) blocks lookback >= 1 but is irrelevant at 0.
+    up = intraday(last_move=+2.0, **kw)
+    up.iloc[-2, col(up, "High")] = 500.0
+    up = calculate_indicators(up)
+    assert check_conditions(up, "UP.NS", tab, ScanConfig(lookback_days=1), make_fetcher({})) is None
+    r = check_conditions(up, "UP.NS", tab, CFG0, make_fetcher({}))
+    assert r and r["Band Status"] == "Above Band"
+
+    dn = intraday(last_move=-2.0, **kw)
+    dn.iloc[-2, col(dn, "Low")] = 1.0
+    dn = calculate_indicators(dn)
+    assert check_conditions(dn, "DN.NS", tab, ScanConfig(lookback_days=1), make_fetcher({})) is None
+    r = check_conditions(dn, "DN.NS", tab, CFG0, make_fetcher({}))
+    assert r and r["Band Status"] == "Below Band"
+
+    # Exactly the band rule: signal iff close is beyond the band.
+    for df in (up, dn, calculate_indicators(intraday(**kw))):
+        close, hi, lo = df["Close"].iloc[-1], df["BB_Upper"].iloc[-1], df["BB_Lower"].iloc[-1]
+        expected = "Above Band" if close > hi else "Below Band" if close < lo else None
+        r = check_conditions(df, "X.NS", tab, CFG0, make_fetcher({}))
+        assert (r["Band Status"] if r else None) == expected
+
+    # No move -> no signal.
+    assert check_conditions(calculate_indicators(intraday(**kw)), "FLAT.NS", tab, CFG0, make_fetcher({})) is None
+
+
+def test_lookback_zero_can_signal_on_first_candle_of_session():
+    tab = ScanTab("5m")
+    df = calculate_indicators(intraday(last_move=+2.0).iloc[:-74])   # latest candle = first of its day
+    assert df.index[-1].date() != df.index[-2].date()
+    r = check_conditions(df, "UP.NS", tab, CFG0, make_fetcher({}))
+    assert (r is not None) == bool(df["Close"].iloc[-1] > df["BB_Upper"].iloc[-1])
+
+
+def test_lookback_zero_engine_filters_and_export(client):
+    c, eng = client
+    c.post("/api/import", data={"file": (io.BytesIO(b"Symbol\nUP.NS\nDN.NS\nFLAT.NS\n"), "l.csv")},
+           content_type="multipart/form-data")
+    for key in ("5m", "60m"):
+        eng._scan_tab(eng.tabs[key], ScanConfig(lookback_days=0))
+        res = c.get(f"/api/results?tab={key}").get_json()
+        assert {r["Symbol"] for r in res["rows"]} == {"UP.NS", "DN.NS"}
+        assert res["above"] == 1 and res["below"] == 1
+        # filters work on band-only signals like any other
+        up = c.get(f"/api/results?tab={key}&band=Above Band&rsi_op=gt&rsi_val=50&change_op=>&change_val=0").get_json()
+        assert [r["Symbol"] for r in up["rows"]] == ["UP.NS"]
+        # a second pass records Continue rows; Scan# filter/export still work
+        eng._scan_tab(eng.tabs[key], ScanConfig(lookback_days=0))
+        cont = c.get(f"/api/results?tab={key}&action_types=Continue 1&scan_from=2&scan_to=2").get_json()
+        assert cont["total_filtered"] == 2
+        exp = c.get(f"/api/export?tab={key}&scan_from=1&scan_to=1&symbol_format=nse")
+        lines = exp.get_data(as_text=True).splitlines()
+        assert exp.status_code == 200 and len(lines) == 3 and "NSE:UP" in exp.get_data(as_text=True)
+        assert [s["scan_no"] for s in c.get(f"/api/scans?tab={key}").get_json()["scans"]] == [2, 1]
+
+
+# ------------------------------------------------------- 1 minute timeframe ----
+def test_one_minute_tab_is_defined():
+    from scanner import TAB_DEFS
+    d = TAB_DEFS["1m"]
+    assert (d["interval"], d["intervals_per_day"], d["tv_interval"]) == ("1m", 375, "1")
+    assert d["period"] == "7d"                       # yfinance's maximum for 1-minute data
+    t = ScanTab("1m")
+    assert t.name == "1 Minute" and t.intervals_per_day == 375
+    assert ScanConfig.from_dict({"scan_1m": True}).scan_1m is True
+    assert ScanConfig.from_dict({}).scan_1m is False  # off unless asked for
+    eng = ScannerEngine(fetcher=make_fetcher({}))
+    assert eng.update_config({"scan_1m": True, "scan_5m": False, "scan_60m": False})[0]   # 1m alone is valid
+    assert not eng.update_config({"scan_1m": False, "scan_5m": False, "scan_60m": False})[0]
+
+
+TF_KW = {"1m": dict(per_day=375, freq="1min"), "5m": dict(), "60m": dict(n_days=20, per_day=7, freq="60min")}
+
+
+@pytest.mark.parametrize("key", ["1m", "5m", "60m"])
+def test_lookback_window_matches_days_for_every_timeframe(key):
+    """Lookback 0 = bands only; lookback N = highest high / lowest low of the previous N
+    days of candles (N x intervals_per_day). A spike at the oldest candle inside the
+    N-day window blocks lookback N but not N-1, for 1m exactly like 5m and 60m."""
+    tab = ScanTab(key)
+    kw = TF_KW[key]
+    per_day = kw.get("per_day", 75)
+    assert tab.intervals_per_day == per_day
+    f = make_fetcher({})
+    for n in (1, 2, 3):
+        for side, col, spike, move in (("Above Band", "High", 500.0, +8.0), ("Below Band", "Low", 1.0, -8.0)):
+            df = intraday(last_move=move, **kw)
+            df.iloc[-(n * per_day + 1), df.columns.get_loc(col)] = spike
+            df = calculate_indicators(df)
+            assert check_conditions(df, "X.NS", tab, ScanConfig(lookback_days=n), f) is None
+            r = check_conditions(df, "X.NS", tab, ScanConfig(lookback_days=n - 1), f)   # n-1 == 0 -> bands only
+            assert r and r["Band Status"] == side
+
+
+def test_one_minute_scan_end_to_end_filters_and_export():
+    # +/-8% jumps: clear the multi-day high/low windows of a 1-minute random walk
+    app = create_app(ScannerEngine(fetcher=make_fetcher({"UP.NS": 8.0, "DN.NS": -8.0})), bundled_path=Path("/nonexistent"))
+    c = app.test_client()
+    eng = app.extensions["scanner"]
+    eng.set_symbols(["UP.NS", "DN.NS", "FLAT.NS"])
+    for lookback in (0, 1, 2):
+        eng.tabs["1m"].clear()
+        eng._scan_tab(eng.tabs["1m"], ScanConfig(scan_1m=True, lookback_days=lookback))
+        res = c.get("/api/results?tab=1m").get_json()
+        assert {r["Symbol"] for r in res["rows"]} == {"UP.NS", "DN.NS"}
+        up = c.get("/api/results?tab=1m&band=Above Band&rsi_op=gt&rsi_val=50&change_op=>&change_val=0").get_json()
+        assert [r["Symbol"] for r in up["rows"]] == ["UP.NS"]
+        eng._scan_tab(eng.tabs["1m"], ScanConfig(scan_1m=True, lookback_days=lookback))
+        cont = c.get("/api/results?tab=1m&action_types=Continue 1&scan_from=2&scan_to=2").get_json()
+        assert cont["total_filtered"] == 2
+        exp = c.get("/api/export?tab=1m&scan_from=1&scan_to=1&symbol_format=nse")
+        txt = exp.get_data(as_text=True)
+        assert exp.status_code == 200 and len(txt.splitlines()) == 3 and "NSE:UP" in txt
+        assert [x["scan_no"] for x in c.get("/api/scans?tab=1m").get_json()["scans"]] == [2, 1]
+    assert c.get("/api/state").get_json()["tabs"]["1m"]["name"] == "1 Minute"
+    assert c.post("/api/clear", json={"tab": "1m"}).get_json()["ok"]
+
+
+def test_engine_runs_1m_5m_60m_passes_in_order():
+    eng = ScannerEngine(fetcher=make_fetcher({"UP.NS": 2.0}))
+    eng.set_symbols(["UP.NS"])
+    assert eng.start({"scan_1m": True, "scan_5m": True, "scan_60m": True, "scan_interval": 5})[0]
+    assert wait_until(lambda: all(t.scan_count >= 1 for t in eng.tabs.values()))
+    eng.stop()
+    assert wait_until(lambda: not eng.scanning)
+    assert {k: len(t.all_results) for k, t in eng.tabs.items()}.keys() == {"1m", "5m", "60m"}
+    assert all(t.all_results[0]["Scan#"] == 1 and t.all_results[0]["ActionType"] == "New Signal"
+               for t in eng.tabs.values())
+
+
+# ------------------------------------------------ Scan# has no gaps ----
+@pytest.mark.parametrize("key", ["1m", "5m", "60m"])
+def test_scan_numbers_do_not_skip_when_a_scan_has_no_output(key):
+    moves = {"UP.NS": 2.0}
+    eng = ScannerEngine(fetcher=lambda *a, **k: make_fetcher(moves)(*a, **k))
+    eng.set_symbols(["UP.NS"])
+    tab = eng.tabs[key]
+    cfg = ScanConfig(lookback_days=0)
+
+    for _ in range(3):                       # scans 1..3 produce output
+        eng._scan_tab(tab, cfg)
+    assert tab.scan_count == 3
+
+    moves.clear()                            # next several passes find nothing
+    for _ in range(4):
+        eng._scan_tab(tab, cfg)
+        assert tab.scan_count == 3           # number 4 is NOT consumed by empty passes
+        assert eng.snapshot()["progress"]["scan_no"] == 4   # ...and is what the next pass is called
+
+    moves["UP.NS"] = 2.0                     # output again -> it gets #4, not #8
+    eng._scan_tab(tab, cfg)
+    assert tab.scan_count == 4
+    assert [e["scan_no"] for e in eng.scan_list(key)] == [4, 3, 2, 1]    # contiguous, no gaps
+    assert sorted({r["Scan#"] for r in tab.all_results}) == [1, 2, 3, 4]
+    assert tab.all_results[-1]["ActionType"] == "Continue 3"
+
+
+def test_scan_numbers_do_not_skip_with_parallel_workers_and_clear_restarts_at_one():
+    moves = {"A.NS": 2.0, "B.NS": -2.0}
+    eng = ScannerEngine(fetcher=lambda *a, **k: make_fetcher(moves)(*a, **k))
+    eng.set_symbols(["A.NS", "B.NS", "C.NS", "D.NS"])
+    tab = eng.tabs["5m"]
+    cfg = ScanConfig(workers=4)
+    eng._scan_tab(tab, cfg)
+    saved = dict(moves); moves.clear()
+    eng._scan_tab(tab, cfg); eng._scan_tab(tab, cfg)                 # two empty passes
+    moves.update(saved)
+    eng._scan_tab(tab, cfg)
+    assert sorted({r["Scan#"] for r in tab.all_results}) == [1, 2]   # was [1, 4] before the fix
+    eng.clear("5m")
+    assert tab.scan_count == 0
+    eng._scan_tab(tab, cfg)
+    assert {r["Scan#"] for r in tab.all_results} == {1}

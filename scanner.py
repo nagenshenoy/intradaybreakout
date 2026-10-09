@@ -33,6 +33,10 @@ AUTO_STOP_TIME = dt.time(15, 25)  # NSE market closes 3:30 PM IST; scanner auto-
 # intervals_per_day is also the candle count used for Rel Vol's "previous day"
 # average: 375 minutes of NSE trading (9:15 AM - 3:30 PM) / interval minutes.
 TAB_DEFS = {
+    # yfinance serves at most 7 calendar days (~5 trading days) of 1-minute data, so
+    # lookback windows longer than that are simply capped at the data available.
+    "1m": dict(name="1 Minute", interval="1m", period="7d",
+               intervals_per_day=375, tv_interval="1"),
     "5m": dict(name="5 Minute", interval="5m", period="10d",
                intervals_per_day=75, tv_interval="5"),
     "60m": dict(name="60 Minute", interval="60m", period="60d",
@@ -62,11 +66,16 @@ def _num(x, default: float = 0.0) -> float:
 # --------------------------------------------------------------------------- #
 @dataclass
 class ScanConfig:
+    scan_1m: bool = False
     scan_5m: bool = True
     scan_60m: bool = False
-    lookback_days: int = 2
-    scan_interval: int = 60
+    lookback_days: int = 0
+    scan_interval: int = 10
     workers: int = 1
+
+    @property
+    def any_timeframe(self) -> bool:
+        return self.scan_1m or self.scan_5m or self.scan_60m
 
     @classmethod
     def from_dict(cls, d: dict) -> "ScanConfig":
@@ -77,16 +86,17 @@ class ScanConfig:
                 return default
 
         return cls(
+            scan_1m=bool(d.get("scan_1m", False)),
             scan_5m=bool(d.get("scan_5m", True)),
             scan_60m=bool(d.get("scan_60m", False)),
-            lookback_days=clamp(d.get("lookback_days"), 1, 10, 2),
+            lookback_days=clamp(d.get("lookback_days"), 0, 10, 2),  # 0 = Bollinger band only, no lookback comparison
             scan_interval=clamp(d.get("scan_interval"), 5, 3600, 60),
             workers=clamp(d.get("workers"), 1, 8, 1),
         )
 
 
 class ScanTab:
-    """State for one timeframe (5m / 60m): counters, results, signal tracker."""
+    """State for one timeframe (1m / 5m / 60m): counters, results, signal tracker."""
 
     def __init__(self, key: str):
         d = TAB_DEFS[key]
@@ -196,10 +206,12 @@ def _rel_vol(data: pd.DataFrame, tab: ScanTab) -> float:
 def check_conditions(data: pd.DataFrame, symbol: str, tab: ScanTab,
                      cfg: ScanConfig, fetcher=fetch_history) -> dict | None:
     """
-    Breakout rule (unchanged from the Tk app):
+    Breakout rule:
       Above Band: close > upper Bollinger band AND close > highest high of the
                   previous `lookback_days` of candles.
       Below Band: close < lower band AND close < lowest low of that window.
+    With `lookback_days == 0` no lookback comparison is made at all: the signal is
+    purely the Bollinger band test (close > upper band, or close < lower band).
     On a hit, enrich with volume / RSI / weekly-level context.
     """
     if data is None or len(data) < 2:
@@ -210,18 +222,24 @@ def check_conditions(data: pd.DataFrame, symbol: str, tab: ScanTab,
     bb_upper = data["BB_Upper"].iloc[-1]
     bb_lower = data["BB_Lower"].iloc[-1]
 
-    lookback_intervals = tab.intervals_per_day * cfg.lookback_days
-    lookback_data = data.iloc[max(0, len(data) - lookback_intervals - 1):-1]
-    if lookback_data.empty:
-        return None
-    lookback_high = lookback_data["High"].max()
-    lookback_low = lookback_data["Low"].min()
-
     band_status = None
-    if current_close > bb_upper and current_close > lookback_high:
-        band_status = "Above Band"
-    elif current_close < bb_lower and current_close < lookback_low:
-        band_status = "Below Band"
+    if cfg.lookback_days == 0:
+        # Band-only mode: nothing to compare against beyond the bands themselves.
+        if current_close > bb_upper:
+            band_status = "Above Band"
+        elif current_close < bb_lower:
+            band_status = "Below Band"
+    else:
+        lookback_intervals = tab.intervals_per_day * cfg.lookback_days
+        lookback_data = data.iloc[max(0, len(data) - lookback_intervals - 1):-1]
+        if lookback_data.empty:
+            return None
+        lookback_high = lookback_data["High"].max()
+        lookback_low = lookback_data["Low"].min()
+        if current_close > bb_upper and current_close > lookback_high:
+            band_status = "Above Band"
+        elif current_close < bb_lower and current_close < lookback_low:
+            band_status = "Below Band"
     if band_status is None:
         return None
 
@@ -405,8 +423,8 @@ class ScannerEngine:
             if not self.stock_list:
                 return False, "Please load a stock list first."
             cfg = ScanConfig.from_dict(cfg_dict)
-            if not cfg.scan_5m and not cfg.scan_60m:
-                return False, "Please select at least one scan type (5m or 60m)."
+            if not cfg.any_timeframe:
+                return False, "Please select at least one scan type (1m, 5m or 60m)."
             self.config = cfg
             self.scanning = True
             self.status = "Starting..."
@@ -426,11 +444,11 @@ class ScannerEngine:
         Change scan setup parameters (timeframes, lookback, interval, workers) at any
         time, including while a scan is running. A scan pass already in progress keeps
         using the settings it started with; the new settings take effect starting with
-        the next scan pass (checked between passes, in the usual 5m-then-60m order).
+        the next scan pass (checked between passes, in the usual 1m, 5m, 60m order).
         """
         cfg = ScanConfig.from_dict(cfg_dict)
-        if not cfg.scan_5m and not cfg.scan_60m:
-            return False, "Please select at least one scan type (5m or 60m)."
+        if not cfg.any_timeframe:
+            return False, "Please select at least one scan type (1m, 5m or 60m)."
         with self.lock:
             self.config = cfg
         return True, "Scan settings updated. They apply from the next scan."
@@ -448,7 +466,7 @@ class ScannerEngine:
     # ---- scan loop ------------------------------------------------------ #
     def _loop(self):
         """
-        Runs 5m/60m scan passes back-to-back, then waits `scan_interval` seconds,
+        Runs 1m/5m/60m scan passes back-to-back, then waits `scan_interval` seconds,
         repeating until stopped. Auto-stop (3:25 PM IST, 5 min before NSE close) only
         applies to a scan that was already running before that time (see `start()`);
         it's checked only between tabs/passes, never mid-symbol-loop, so a tab that is
@@ -462,19 +480,16 @@ class ScannerEngine:
                     auto_stopped = True
                     break
                 cfg = self.config
-                if cfg.scan_5m:
-                    self._scan_tab(self.tabs["5m"], cfg)
-                if self._stop.is_set():
-                    break
-                if armed and self._past_auto_stop():
-                    auto_stopped = True
-                    break
-                if cfg.scan_60m:
-                    self._scan_tab(self.tabs["60m"], cfg)
-                if self._stop.is_set():
-                    break
-                if armed and self._past_auto_stop():
-                    auto_stopped = True
+                for key, enabled in (("1m", cfg.scan_1m), ("5m", cfg.scan_5m), ("60m", cfg.scan_60m)):
+                    if not enabled:
+                        continue
+                    self._scan_tab(self.tabs[key], cfg)
+                    if self._stop.is_set():
+                        break
+                    if armed and self._past_auto_stop():
+                        auto_stopped = True
+                        break
+                if self._stop.is_set() or auto_stopped:
                     break
                 for i in range(cfg.scan_interval):
                     left = cfg.scan_interval - i
@@ -513,13 +528,18 @@ class ScannerEngine:
             self._seq += 1
             tab.all_results.append({**stock, "id": self._seq, "Scan#": scan_no,
                                     "Time": scan_time, "ActionType": action})
+            # The Scan# is only "used up" once a pass actually produces output, so passes
+            # with no signals never leave a gap in the sequence.
+            tab.scan_count = max(tab.scan_count, scan_no)
             tab.version += 1
             self.progress["found"] += 1
 
     def _scan_tab(self, tab: ScanTab, cfg: ScanConfig):
         with self.lock:
-            tab.scan_count += 1
-            scan_no = tab.scan_count
+            # Provisional number: the next unused Scan#. tab.scan_count only advances when
+            # this pass records a signal (see _record_match), so an empty pass hands the
+            # same number to the next pass instead of skipping it.
+            scan_no = tab.scan_count + 1
             symbols = list(self.stock_list)  # snapshot: a list change mid-scan applies next scan
             total = len(symbols)
             self.progress = {**_idle_progress(), "phase": "scanning", "tab": tab.key,

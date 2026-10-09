@@ -16,7 +16,7 @@
     sortDir: 'desc',
     limit: 1000,
     scanning: false,
-    collapsed: { '5m': new Set(), '60m': new Set() },   // per-tab collapsed Scan# groups
+    collapsed: { '1m': new Set(), '5m': new Set(), '60m': new Set() },   // per-tab collapsed Scan# groups
     scanList: {},              // tab -> [{scan_no, time, count}], for the Export panel
     totalFiltered: 0,          // rows matching the current Filters panel query, this tab
   };
@@ -288,6 +288,7 @@
   function syncConfigOnce(cfg) {
     if (S.cfgSynced) return;
     S.cfgSynced = true;               // reflect a scan that is already running (e.g. after a page reload)
+    $('#cfg-1m').checked = cfg.scan_1m;
     $('#cfg-5m').checked = cfg.scan_5m;
     $('#cfg-60m').checked = cfg.scan_60m;
     $('#cfg-lookback').value = cfg.lookback_days;
@@ -353,6 +354,7 @@
   // ----------------------------------------------------------- actions
   function readScanSetup() {
     return {
+      scan_1m: $('#cfg-1m').checked,
       scan_5m: $('#cfg-5m').checked,
       scan_60m: $('#cfg-60m').checked,
       lookback_days: $('#cfg-lookback').value,
@@ -367,7 +369,8 @@
       await postJSON('/api/scan/start', cfg);
       toast('Scan started', 'ok');
       // Show a tab that is actually being scanned.
-      if (!cfg.scan_5m && cfg.scan_60m && S.tab !== '60m') switchTab('60m');
+      const scanned = ['1m', '5m', '60m'].filter(k => cfg['scan_' + k]);
+      if (scanned.length && !scanned.includes(S.tab)) switchTab(scanned[0]);
     } catch (e) { toast(e.message, 'error'); }
   }
 
@@ -632,10 +635,10 @@
 
   // What you see while a panel is collapsed, so hidden settings are never a mystery.
   function updateSummaries() {
-    const types = [$('#cfg-5m').checked && '5m', $('#cfg-60m').checked && '60m'].filter(Boolean).join(' + ') || 'no timeframe';
+    const types = [$('#cfg-1m').checked && '1m', $('#cfg-5m').checked && '5m', $('#cfg-60m').checked && '60m'].filter(Boolean).join(' + ') || 'no timeframe';
     const n = S.lastState ? S.lastState.symbols : 0;
     $('#setup-summary').textContent =
-      `${types} · lookback ${$('#cfg-lookback').value}d · every ${$('#cfg-interval').value}s · ${n} symbols`;
+      `${types} · lookback ${$('#cfg-lookback').value === '0' ? 'bands only' : $('#cfg-lookback').value + 'd'} · every ${$('#cfg-interval').value}s · ${n} symbols`;
 
     const active = [
       $('#f-symbol').value.trim() !== '', $('#f-band').value !== 'All', $('#f-change-op').value !== 'none',
@@ -660,7 +663,7 @@
   $$('.act-check, #act-all, #act-none').forEach(el => el.addEventListener('click', updateSummaries));
   // Scan Setup fields (not the stock-list controls) push live to the server when
   // a scan is already running, so changes apply from the next scan pass.
-  $$('#cfg-5m, #cfg-60m, #cfg-lookback, #cfg-interval, #cfg-workers').forEach(el =>
+  $$('#cfg-1m, #cfg-5m, #cfg-60m, #cfg-lookback, #cfg-interval, #cfg-workers').forEach(el =>
     el.addEventListener('change', pushScanConfigIfRunning));
 
   // ------------------------------------------------------------- boot

@@ -55,7 +55,7 @@ Set `HOST` / `PORT` environment variables to change the bind address (default `1
 |---|---|
 | Import CSV/XLSX dialog | Quick-load bundled sheets, upload with sheet picker |
 | Fixed scan setup (stop to change it) | **Live setup updates**: change timeframes/lookback/interval/workers while running (see below) |
-| 5m / 60m notebook tabs | Pill tabs |
+| 5m / 60m notebook tabs | Pill tabs (now 1m / 5m / 60m) |
 | Lookback days, RSI lookback, scan interval | Same controls |
 | Filters + "Apply Filters" | Same filters, evaluated server-side; Apply, Enter, or changing a dropdown re-applies them |
 | Colour-coded text widget | Sortable table (green = Above Band, red = Below Band) |
@@ -67,6 +67,38 @@ Set `HOST` / `PORT` environment variables to change the bind address (default `1
 
 Signal rules, RSI thresholds (80 for 5m, 75 for 60m, below 25 vs daily RSI), weekly / 2-week high-low
 comparison, and the "New Signal / Continue N" tracking are the same as before.
+
+### 1-minute timeframe
+
+Tick **1 min scan** under Timeframes to add a 1 Minute tab alongside 5m and 60m. It uses the same rules,
+Rel Vol, weekly levels, Filters, Scan# grouping and CSV export as the other tabs, and the lookback setting
+(0 = bands only, 1-10 days) works identically. Passes run in the order 1m, 5m, 60m. It is off by default.
+
+Yahoo Finance only provides about 7 calendar days (roughly 5 trading days) of 1-minute data, so a
+lookback of 6-10 days on the 1m tab is effectively capped at the history available. A 1-minute pass also
+downloads far more candles per symbol, so expect it to be slower on large lists (consider more workers).
+
+### Scan numbers
+
+A Scan# is only used once a scan pass finds at least one signal. A pass with no signals does not consume
+a number, so the sequence has no gaps (after scan 66, an empty pass is followed by another pass that is
+also called 67, until one produces output). Each timeframe numbers its scans independently, and Clear
+restarts a tab at 1. The "Last scan #" tile shows the most recent number that has signals.
+
+### Lookback days (0 = Bollinger bands only)
+
+`Lookback days` accepts **0 to 10** (default 2).
+
+- **1-10**: a breakout needs the close beyond the band *and* beyond the highest high / lowest low of the
+  previous N trading days of candles (N x 375 for 1-minute, N x 75 for 5-minute, N x 7 for 60-minute).
+- **0 (bands only)**: no lookback comparison at all. **Above Band** = close above the upper Bollinger Band;
+  **Below Band** = close below the lower band. Works for the 1-, 5- and 60-minute scans, and any
+  candle of the session (including the first) can signal.
+
+Because there is no high/low filter, lookback 0 produces noticeably more signals than 1 or more. Signals are
+ordinary results: Filters, Scan# grouping, Continue-N tracking and CSV export treat them like any other.
+Lookback can be changed live and applies from the next scan pass. Rows don't record which lookback produced
+them, so if you change it mid-run, earlier and later Scan# groups use different rules.
 
 ### Rel Vol (replaces the old High Volume flag)
 
@@ -148,7 +180,7 @@ sample_symbols.csv
 | GET | `/api/sources` | Bundled sheets (with symbol counts) and the latest multi-sheet upload |
 | POST | `/api/load` | JSON: `{"source": "bundled" or <upload token>, "sheet": "Nifty50"}` |
 | POST | `/api/import` | Upload symbol list (multipart `file`). Multi-sheet workbooks return `needs_sheet` + a token |
-| POST | `/api/scan/start` | JSON: `scan_5m, scan_60m, lookback_days, scan_interval, workers` |
+| POST | `/api/scan/start` | JSON: `scan_1m, scan_5m, scan_60m, lookback_days, scan_interval, workers` |
 | POST | `/api/scan/config` | Same JSON as `/api/scan/start`; updates settings for a scan already running, applied from the next scan pass |
 | POST | `/api/scan/stop` | Stop after the current symbol |
 | POST | `/api/clear` | JSON: `{"tab": "5m"}` |

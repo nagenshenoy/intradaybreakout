@@ -48,7 +48,7 @@
   <!-- KPI strip -->
   <div class="kpi-strip">
     <div class="kpi-card"><div class="kpi-label">Symbols loaded</div><div class="kpi-value accent" id="kpi-symbols">0</div><div class="kpi-sub" id="kpi-file">No file selected</div></div>
-    <div class="kpi-card"><div class="kpi-label">Scans run</div><div class="kpi-value" id="kpi-scans">0</div><div class="kpi-sub" id="kpi-tabname">5 Minute tab</div></div>
+    <div class="kpi-card"><div class="kpi-label">Last scan #</div><div class="kpi-value" id="kpi-scans">0</div><div class="kpi-sub" id="kpi-tabname">5 Minute tab</div></div>
     <div class="kpi-card"><div class="kpi-label">Signals recorded</div><div class="kpi-value" id="kpi-total">0</div><div class="kpi-sub">all scans, this tab</div></div>
     <div class="kpi-card"><div class="kpi-label">Above band</div><div class="kpi-value positive" id="kpi-above">0</div><div class="kpi-sub">after filters</div></div>
     <div class="kpi-card"><div class="kpi-label">Below band</div><div class="kpi-value negative" id="kpi-below">0</div><div class="kpi-sub">after filters</div></div>
@@ -92,13 +92,14 @@
 
         <div class="ctl-group">
           <div class="ctl-title">Timeframes</div>
+          <label class="check"><input type="checkbox" id="cfg-1m"> 1 min scan</label>
           <label class="check"><input type="checkbox" id="cfg-5m" checked> 5 min scan</label>
           <label class="check"><input type="checkbox" id="cfg-60m"> 60 min scan</label>
         </div>
 
         <div class="ctl-group ctl-fields">
           <label class="field"><span>Lookback days</span>
-            <select id="cfg-lookback">{% for i in range(1, 11) %}<option value="{{ i }}" {{ 'selected' if i == 2 }}>{{ i }}</option>{% endfor %}</select></label>
+            <select id="cfg-lookback" title="0 = Bollinger band only, no lookback comparison">{% for i in range(0, 11) %}<option value="{{ i }}" {{ 'selected' if i == 2 }}>{{ '0 (bands only)' if i == 0 else i }}</option>{% endfor %}</select></label>
           <label class="field"><span>Scan interval (s)</span>
             <input type="number" id="cfg-interval" value="60" min="5" max="3600" step="5"></label>
           <label class="field" title="Parallel symbol fetches. 1 = sequential (safest for Yahoo rate limits)."><span>Parallel fetches</span>
@@ -201,6 +202,7 @@
 
   <!-- Tabs -->
   <div class="pill-nav" id="tab-nav">
+    <button class="pill-tab" data-tab="1m" type="button">1 Minute scan <span class="count" id="cnt-1m">0</span></button>
     <button class="pill-tab active" data-tab="5m" type="button">5 Minute scan <span class="count" id="cnt-5m">0</span></button>
     <button class="pill-tab" data-tab="60m" type="button">60 Minute scan <span class="count" id="cnt-60m">0</span></button>
   </div>
