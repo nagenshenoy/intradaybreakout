@@ -142,10 +142,10 @@ def test_weekly_levels_and_json_safe():
 
 def test_filters():
     rows = [
-        {"id": 1, "Symbol": "AAA.NS", "Band Status": "Above Band", "RSI(14)": 82.0, "Change%": 2.0,
-         "Scan#": 1, "ActionType": "New Signal", "RelVol": 2.5, "WeekHL_Color": "Green", "Week2HL_Color": "Black"},
-        {"id": 2, "Symbol": "BBB.NS", "Band Status": "Below Band", "RSI(14)": 20.0, "Change%": -3.0,
-         "Scan#": 2, "ActionType": "Continue 1", "RelVol": 0.6, "WeekHL_Color": "Red", "Week2HL_Color": "Red"},
+        {"id": 1, "Symbol": "AAA.NS", "Band Status": "Above Band", "RSI": 82.0, "Change%": 2.0,
+         "Scan#": 1, "ActionType": "New Signal", "RelVol": 2.5, "WeekHL_Color": "Green"},
+        {"id": 2, "Symbol": "BBB.NS", "Band Status": "Below Band", "RSI": 20.0, "Change%": -3.0,
+         "Scan#": 2, "ActionType": "Continue 1", "RelVol": 0.6, "WeekHL_Color": "Red"},
     ]
     f = lambda **kw: filter_results(rows, parse_filters(kw))  # noqa: E731
     assert len(f()) == 2
@@ -651,3 +651,106 @@ def test_scan_numbers_do_not_skip_with_parallel_workers_and_clear_restarts_at_on
     assert tab.scan_count == 0
     eng._scan_tab(tab, cfg)
     assert {r["Scan#"] for r in tab.all_results} == {1}
+
+
+# --------------------------------------- Change% basis, RSI period, no 2-wk ----
+def _two_day_df(prev_close=100.0, open_today=102.0, last_close=105.0, n=40):
+    """Flat history, then a final session that opens at `open_today` and ends at `last_close`."""
+    df = intraday(n_days=3, per_day=75)
+    df.iloc[:, df.columns.get_loc("Close")] = prev_close
+    df.iloc[:, df.columns.get_loc("Open")] = prev_close
+    df.iloc[:, df.columns.get_loc("High")] = prev_close + 0.05
+    df.iloc[:, df.columns.get_loc("Low")] = prev_close - 0.05
+    last_day = df.index.date == df.index[-1].date()
+    df.loc[last_day, "Open"] = open_today
+    df.loc[last_day, "Close"] = open_today
+    df.loc[last_day, "High"] = open_today + 0.05
+    df.loc[last_day, "Low"] = open_today - 0.05
+    df.iloc[-1, df.columns.get_loc("Close")] = last_close
+    df.iloc[-1, df.columns.get_loc("High")] = last_close
+    return df
+
+
+def test_change_pct_basis_prev_close_vs_open():
+    tab = ScanTab("5m")
+    f = make_fetcher({})
+    df = calculate_indicators(_two_day_df(prev_close=100.0, open_today=102.0, last_close=105.0))
+    assert ScanConfig().change_from_prev_close is True            # default = previous day's close
+    r = check_conditions(df, "X.NS", tab, ScanConfig(lookback_days=0), f)
+    assert r["Change%"] == pytest.approx(5.0, abs=1e-6)           # (105-100)/100
+    r = check_conditions(df, "X.NS", tab, ScanConfig(lookback_days=0, change_from_prev_close=False), f)
+    assert r["Change%"] == pytest.approx((105 - 102) / 102 * 100, abs=1e-6)   # from today's open
+
+
+def test_change_pct_falls_back_to_open_without_a_previous_session():
+    tab = ScanTab("5m")
+    df = intraday(n_days=1, last_move=+3.0)               # a single session: no previous close exists
+    df = calculate_indicators(df)
+    day_open = float(df["Open"].iloc[0])
+    r = check_conditions(df, "X.NS", tab, ScanConfig(lookback_days=0), make_fetcher({}))
+    assert r and r["Change%"] == pytest.approx((df["Close"].iloc[-1] - day_open) / day_open * 100)
+
+
+def test_change_basis_config_parsing():
+    assert ScanConfig.from_dict({}).change_from_prev_close is True
+    assert ScanConfig.from_dict({"change_from_prev_close": False}).change_from_prev_close is False
+    assert ScanConfig.from_dict({"change_from_prev_close": True}).change_from_prev_close is True
+    assert ScanConfig.from_dict({"change_from_prev_close": "false"}).change_from_prev_close is False
+    assert ScanConfig.from_dict({"change_from_prev_close": "true"}).change_from_prev_close is True
+
+
+def test_rsi_period_config_and_effect():
+    assert ScanConfig().rsi_period == 14
+    assert ScanConfig.from_dict({}).rsi_period == 14
+    assert ScanConfig.from_dict({"rsi_period": "9"}).rsi_period == 9
+    assert ScanConfig.from_dict({"rsi_period": 0}).rsi_period == 2      # clamped 2..50
+    assert ScanConfig.from_dict({"rsi_period": 500}).rsi_period == 50
+    assert ScanConfig.from_dict({"rsi_period": "abc"}).rsi_period == 14
+    tab, f = ScanTab("5m"), make_fetcher({})
+    out = {}
+    for period in (14, 5):
+        df = calculate_indicators(intraday(last_move=+2.0), rsi_period=period)
+        r = check_conditions(df, "X.NS", tab, ScanConfig(lookback_days=0, rsi_period=period), f)
+        assert r["RSIPeriod"] == period and "RSI(14)" not in r
+        out[period] = r["RSI"]
+    assert out[14] != out[5]                                        # the period really changes the value
+    # period is taken from how the indicators were actually computed, not just the config
+    df = calculate_indicators(intraday(last_move=+2.0), rsi_period=7)
+    assert check_conditions(df, "X.NS", tab, ScanConfig(lookback_days=0, rsi_period=14), f)["RSIPeriod"] == 7
+
+
+def test_rsi_period_flows_through_engine_filters_and_export(client):
+    c, eng = client
+    c.post("/api/import", data={"file": (io.BytesIO(b"Symbol\nUP.NS\nDN.NS\nFLAT.NS\n"), "l.csv")},
+           content_type="multipart/form-data")
+    seen = {}
+    for period in (14, 6):
+        eng.tabs["5m"].clear()
+        eng._scan_tab(eng.tabs["5m"], ScanConfig(lookback_days=0, rsi_period=period))
+        rows = c.get("/api/results?tab=5m").get_json()["rows"]
+        assert rows and all(r["RSIPeriod"] == period for r in rows)
+        seen[period] = {r["Symbol"]: r["RSI"] for r in rows}
+        up = c.get(f"/api/results?tab=5m&rsi_op=gt&rsi_val=50&band=Above Band").get_json()   # filter uses RSI
+        assert [r["Symbol"] for r in up["rows"]] == ["UP.NS"]
+        header = c.get("/api/export?tab=5m").get_data(as_text=True).splitlines()[0]
+        assert f"RSI({period})" in header and "RSI(14)" not in header.replace(f"RSI({period})", "")
+    assert seen[14]["UP.NS"] != seen[6]["UP.NS"]
+    # mixed periods in one export fall back to a plain "RSI" header
+    eng._scan_tab(eng.tabs["5m"], ScanConfig(lookback_days=0, rsi_period=14))
+    header = c.get("/api/export?tab=5m").get_data(as_text=True).splitlines()[0].split(",")
+    assert "RSI" in header and not any(h.startswith("RSI(") for h in header)
+
+
+def test_two_week_levels_are_gone():
+    r = check_conditions(calculate_indicators(intraday(last_move=+2.0)), "X.NS", ScanTab("5m"),
+                         ScanConfig(lookback_days=0), make_fetcher({}))
+    assert not any("2" in k and ("Week" in k or "Wk" in k) for k in r)
+    assert {"WeekHL_Color", "PrevWeekHigh", "PrevWeekLow", "Week1Pct"} <= set(r)   # 1-week data kept
+    from scanner import EXPORT_COLUMNS
+    labels = " ".join(label for _, label in EXPORT_COLUMNS)
+    assert "Week2" not in labels and "Prev2" not in labels
+    assert "week2" not in parse_filters({"week2": "Green"})
+    # a stray week2 query param is simply ignored
+    rows = [{"Symbol": "A.NS", "Band Status": "Above Band", "RSI": 60.0, "Change%": 1.0, "Scan#": 1,
+             "ActionType": "New Signal", "RelVol": 1.0, "WeekHL_Color": "Black"}]
+    assert len(filter_results(rows, parse_filters({"week2": "Green"}))) == 1

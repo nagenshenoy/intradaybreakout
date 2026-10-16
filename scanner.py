@@ -66,12 +66,16 @@ def _num(x, default: float = 0.0) -> float:
 # --------------------------------------------------------------------------- #
 @dataclass
 class ScanConfig:
-    scan_1m: bool = False
-    scan_5m: bool = True
+    scan_1m: bool = True
+    scan_5m: bool = False
     scan_60m: bool = False
-    lookback_days: int = 0
+    lookback_days: int = 1
     scan_interval: int = 10
     workers: int = 1
+    rsi_period: int = 2
+    # True: Change% = move from the previous trading day's close (default).
+    # False: Change% = move from today's opening price.
+    change_from_prev_close: bool = True
 
     @property
     def any_timeframe(self) -> bool:
@@ -85,13 +89,22 @@ class ScanConfig:
             except (TypeError, ValueError):
                 return default
 
+        def as_bool(v, default):
+            if v is None:
+                return default
+            if isinstance(v, str):
+                return v.strip().lower() not in ("", "0", "false", "no", "off")
+            return bool(v)
+
         return cls(
-            scan_1m=bool(d.get("scan_1m", False)),
-            scan_5m=bool(d.get("scan_5m", True)),
+            scan_1m=bool(d.get("scan_1m", True)),
+            scan_5m=bool(d.get("scan_5m", False)),
             scan_60m=bool(d.get("scan_60m", False)),
             lookback_days=clamp(d.get("lookback_days"), 0, 10, 2),  # 0 = Bollinger band only, no lookback comparison
             scan_interval=clamp(d.get("scan_interval"), 5, 3600, 60),
             workers=clamp(d.get("workers"), 1, 8, 1),
+            rsi_period=clamp(d.get("rsi_period"), 2, 50, 14),
+            change_from_prev_close=as_bool(d.get("change_from_prev_close"), True),
         )
 
 
@@ -119,21 +132,21 @@ class ScanTab:
 # --------------------------------------------------------------------------- #
 # Indicators + breakout conditions
 # --------------------------------------------------------------------------- #
-def calculate_indicators(data: pd.DataFrame) -> pd.DataFrame | None:
+def calculate_indicators(data: pd.DataFrame, rsi_period: int = 14) -> pd.DataFrame | None:
     try:
         bb = BollingerBands(close=data["Close"], window=20, window_dev=2)
         data["BB_Upper"] = bb.bollinger_hband()
         data["BB_Lower"] = bb.bollinger_lband()
-        data["RSI"] = RSIIndicator(close=data["Close"], window=14).rsi()
+        data["RSI"] = RSIIndicator(close=data["Close"], window=int(rsi_period)).rsi()
+        data.attrs["rsi_period"] = int(rsi_period)   # so each signal records the period it used
         return data
     except Exception:  # noqa: BLE001 - mirrors the original "skip bad data"
         return None
 
 
 def _weekly_levels(symbol, current_close, fetcher) -> dict:
-    """Previous-week and 2-weeks-ago high/low, and where LTP sits against them."""
-    out = dict(WeekHL_Color="Black", PrevWeekHigh=0.0, PrevWeekLow=0.0, Week1Pct=None,
-               Week2HL_Color="Black", Prev2WeekHigh=0.0, Prev2WeekLow=0.0, Week2Pct=None)
+    """Previous-week high/low, and where LTP sits against them."""
+    out = dict(WeekHL_Color="Black", PrevWeekHigh=0.0, PrevWeekLow=0.0, Week1Pct=None)
     try:
         weekly = fetcher(symbol, period="3wk", interval="1wk", auto_adjust=False)
     except Exception as e:  # noqa: BLE001
@@ -148,29 +161,20 @@ def _weekly_levels(symbol, current_close, fetcher) -> dict:
 
     if current_week_row:
         p1 = -2 if len(weekly) >= 2 else None
-        p2 = -3 if len(weekly) >= 3 else None
     else:
         p1 = -1 if len(weekly) >= 1 else None
-        p2 = -2 if len(weekly) >= 2 else None
 
-    def level(idx):
-        if idx is None:
-            return 0.0, 0.0
-        return _num(weekly["High"].iloc[idx]), _num(weekly["Low"].iloc[idx])
-
-    def classify(high, low):
-        if high > 0 and current_close > high:
-            return "Green", (current_close - high) / high * 100
-        if low > 0 and current_close < low:
-            return "Red", (current_close - low) / low * 100
-        return "Black", None
-
-    h1, l1 = level(p1)
-    h2, l2 = level(p2)
-    c1, pct1 = classify(h1, l1)
-    c2, pct2 = classify(h2, l2)
-    out.update(WeekHL_Color=c1, PrevWeekHigh=h1, PrevWeekLow=l1, Week1Pct=pct1,
-               Week2HL_Color=c2, Prev2WeekHigh=h2, Prev2WeekLow=l2, Week2Pct=pct2)
+    if p1 is None:
+        return out
+    high = _num(weekly["High"].iloc[p1])
+    low = _num(weekly["Low"].iloc[p1])
+    if high > 0 and current_close > high:
+        color, pct = "Green", (current_close - high) / high * 100
+    elif low > 0 and current_close < low:
+        color, pct = "Red", (current_close - low) / low * 100
+    else:
+        color, pct = "Black", None
+    out.update(WeekHL_Color=color, PrevWeekHigh=high, PrevWeekLow=low, Week1Pct=pct)
     return out
 
 
@@ -243,20 +247,28 @@ def check_conditions(data: pd.DataFrame, symbol: str, tab: ScanTab,
     if band_status is None:
         return None
 
-    # Change% = move since the open of the latest session in the data.
+    # Change%: from the previous trading day's close (default), or from the open of the
+    # latest session. If the data holds no earlier session (nothing to take a previous
+    # close from), it falls back to the session open rather than showing nothing.
     change_pct = 0.0
     last_date = data.index[-1].date()
     session = data[data.index.date == last_date]
-    if not session.empty:
-        day_open = float(session["Open"].iloc[0])
-        if day_open:
-            change_pct = (current_close - day_open) / day_open * 100
+    base = 0.0
+    if cfg.change_from_prev_close:
+        prior = data[data.index.date < last_date]
+        if not prior.empty:
+            base = float(prior["Close"].iloc[-1])
+    if not base and not session.empty:
+        base = float(session["Open"].iloc[0])
+    if base:
+        change_pct = (current_close - base) / base * 100
 
     result = {
         "Symbol": symbol,
         "LTP": _num(current_close),
         "Change%": _num(change_pct),
-        "RSI(14)": _num(current_rsi) if pd.notna(current_rsi) else 0.0,
+        "RSI": _num(current_rsi) if pd.notna(current_rsi) else 0.0,
+        "RSIPeriod": int(data.attrs.get("rsi_period", cfg.rsi_period)),
         "Band Status": band_status,
         "RelVol": _num(_rel_vol(data, tab)),
     }
@@ -295,7 +307,6 @@ def parse_filters(args) -> dict:
         "relvol_op": args.get("relvol_op") or "none",
         "relvol_val": fnum("relvol_val", 1.0),
         "week1": args.get("week1") or "All",
-        "week2": args.get("week2") or "All",
         "scan_from": fnum("scan_from"),
         "scan_to": fnum("scan_to"),
         "action_types": None,
@@ -323,13 +334,11 @@ def filter_results(results: list[dict], f: dict) -> list[dict]:
             continue
         if f["scan_to"] is not None and r["Scan#"] > f["scan_to"]:
             continue
-        if f["rsi_op"] == "gt" and not r["RSI(14)"] > f["rsi_val"]:
+        if f["rsi_op"] == "gt" and not r["RSI"] > f["rsi_val"]:
             continue
-        if f["rsi_op"] == "lt" and not r["RSI(14)"] < f["rsi_val"]:
+        if f["rsi_op"] == "lt" and not r["RSI"] < f["rsi_val"]:
             continue
         if f["week1"] != "All" and r.get("WeekHL_Color") != f["week1"]:
-            continue
-        if f["week2"] != "All" and r.get("Week2HL_Color") != f["week2"]:
             continue
         if f["change_op"] in CHANGE_OPS and not CHANGE_OPS[f["change_op"]](r["Change%"], f["change_val"]):
             continue
@@ -339,12 +348,10 @@ def filter_results(results: list[dict], f: dict) -> list[dict]:
 
 EXPORT_COLUMNS = [
     ("Scan#", "Scan#"), ("Time", "Time"), ("Symbol", "Symbol"), ("LTP", "LTP"),
-    ("Change%", "Change%"), ("RSI(14)", "RSI(14)"), ("Band Status", "Band Status"),
+    ("Change%", "Change%"), ("RSI", "RSI"), ("Band Status", "Band Status"),
     ("ActionType", "ActionType"), ("RelVol", "RelVol"),
     ("WeekHL_Color", "Week1 Status"), ("Week1Pct", "Week1 %vsLevel"),
     ("PrevWeekHigh", "PrevWeekHigh"), ("PrevWeekLow", "PrevWeekLow"),
-    ("Week2HL_Color", "Week2 Status"), ("Week2Pct", "Week2 %vsLevel"),
-    ("Prev2WeekHigh", "Prev2WeekHigh"), ("Prev2WeekLow", "Prev2WeekLow"),
 ]
 
 # Export-time symbol formats. Symbols are stored internally as Yahoo Finance
@@ -365,13 +372,17 @@ def format_symbol(symbol: str, fmt: str = "ns") -> str:
 
 
 def results_to_csv(rows: list[dict], symbol_format: str = "ns") -> str:
+    # The RSI header names its period, e.g. "RSI(14)". If the exported rows were produced
+    # with different periods (setting changed mid-run) it is just "RSI".
+    periods = {r.get("RSIPeriod") for r in rows} - {None}
+    rsi_label = f"RSI({periods.pop()})" if len(periods) == 1 else "RSI"
+    labels = [rsi_label if k == "RSI" else label for k, label in EXPORT_COLUMNS]
     df = pd.DataFrame(rows)
     df = df.reindex(columns=[k for k, _ in EXPORT_COLUMNS])
     if "Symbol" in df.columns and not df.empty:
         df["Symbol"] = df["Symbol"].apply(lambda s: format_symbol(s, symbol_format))
-    df.columns = [label for _, label in EXPORT_COLUMNS]
-    for col in ("LTP", "Change%", "RSI(14)", "RelVol", "Week1 %vsLevel", "Week2 %vsLevel",
-                "PrevWeekHigh", "PrevWeekLow", "Prev2WeekHigh", "Prev2WeekLow"):
+    df.columns = labels
+    for col in ("LTP", "Change%", rsi_label, "RelVol", "Week1 %vsLevel", "PrevWeekHigh", "PrevWeekLow"):
         df[col] = df[col].astype(float).round(2)
     return df.to_csv(index=False)
 
@@ -557,7 +568,7 @@ class ScannerEngine:
                 data = self.fetcher(symbol, period=tab.period, interval=tab.interval)
                 if data is None or data.empty:
                     return
-                data = calculate_indicators(data)
+                data = calculate_indicators(data, cfg.rsi_period)
                 if data is None:
                     return
                 result = check_conditions(data, symbol, tab, cfg, self.fetcher)

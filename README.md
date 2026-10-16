@@ -65,8 +65,23 @@ Set `HOST` / `PORT` environment variables to change the bind address (default `1
 | RSI-extreme "RSI>XD" column | Removed, along with the RSI-lookback config option it depended on |
 | Flat, ever-growing results list | **Collapsible rows grouped by Scan#** (see below) |
 
-Signal rules, RSI thresholds (80 for 5m, 75 for 60m, below 25 vs daily RSI), weekly / 2-week high-low
-comparison, and the "New Signal / Continue N" tracking are the same as before.
+Signal rules, weekly (previous-week) high-low comparison, and the "New Signal / Continue N" tracking are the same as before.
+
+### Change% basis and RSI period (Scan Setup)
+
+- **Change% vs previous day's close** (ticked by default): Change% = (latest close - previous trading day's
+  close) / previous close. Untick it to use the old basis, the move from today's opening price. If the
+  fetched data has no earlier session to take a close from, it falls back to today's open.
+- **RSI period** (default 14, allowed 2-50): the RSI window in candles. The table header shows `RSI(n)`,
+  and the CSV export header does too (a plain `RSI` if the exported rows were produced with different
+  periods).
+
+Both can be changed live like the other Scan Setup fields and apply from the next pass. Rows don't record
+the Change% basis, and only the RSI period is stored per row, so after a mid-run change, earlier and later
+Scan# groups were computed under different settings.
+
+The "-2 Week H/L" column, filter, modal fields and export columns have been removed; the one-week
+"Wk H/L" column and filter remain.
 
 ### 1-minute timeframe
 
@@ -180,11 +195,11 @@ sample_symbols.csv
 | GET | `/api/sources` | Bundled sheets (with symbol counts) and the latest multi-sheet upload |
 | POST | `/api/load` | JSON: `{"source": "bundled" or <upload token>, "sheet": "Nifty50"}` |
 | POST | `/api/import` | Upload symbol list (multipart `file`). Multi-sheet workbooks return `needs_sheet` + a token |
-| POST | `/api/scan/start` | JSON: `scan_1m, scan_5m, scan_60m, lookback_days, scan_interval, workers` |
+| POST | `/api/scan/start` | JSON: `scan_1m, scan_5m, scan_60m, lookback_days, scan_interval, workers, rsi_period, change_from_prev_close` |
 | POST | `/api/scan/config` | Same JSON as `/api/scan/start`; updates settings for a scan already running, applied from the next scan pass |
 | POST | `/api/scan/stop` | Stop after the current symbol |
 | POST | `/api/clear` | JSON: `{"tab": "5m"}` |
-| GET | `/api/results` | Filtered rows, query: `tab, symbol, band, change_op, change_val, rsi_op, rsi_val, action_types, high_vol, week1, week2, scan_from, scan_to` |
+| GET | `/api/results` | Filtered rows, query: `tab, symbol, band, change_op, change_val, rsi_op, rsi_val, action_types, high_vol, week1, scan_from, scan_to` |
 | GET | `/api/scans` | Distinct Scan# values for a tab (`tab`), newest first, each with its time and signal count — powers the Export panel's Scan# dropdown |
 | GET | `/api/export` | Same query as `/api/results`, plus `symbol_format` (`ns` \| `plain` \| `nse`); returns CSV |
 

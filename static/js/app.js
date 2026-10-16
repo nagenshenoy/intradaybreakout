@@ -79,7 +79,6 @@
     p.set('relvol_op', $('#f-relvol-op').value);
     p.set('relvol_val', $('#f-relvol-val').value);
     p.set('week1', $('#f-week1').value);
-    p.set('week2', $('#f-week2').value);
     p.set('scan_from', $('#f-from').value);
     p.set('scan_to', $('#f-to').value);
     p.set('action_types', selectedActions().join(','));
@@ -104,7 +103,6 @@
     $('#f-relvol-op').value = 'none';
     $('#f-relvol-val').value = '1';
     $('#f-week1').value = 'All';
-    $('#f-week2').value = 'All';
     $('#f-from').value = '';
     $('#f-to').value = '';
     $$('.act-check').forEach(c => { c.checked = true; });
@@ -118,13 +116,12 @@
     { key: 'Time', label: 'Time' },
     { key: 'Symbol', label: 'Symbol' },
     { key: 'LTP', label: 'LTP', num: true },
-    { key: 'Change%', label: 'Change%', num: true },
-    { key: 'RSI(14)', label: 'RSI(14)', num: true },
+    { key: 'Change%', label: 'Change%', num: true, tip: "Move vs previous day's close, or from today's open if that option is unticked in Scan Setup" },
+    { key: 'RSI', label: 'RSI', num: true, tip: 'RSI period is set in Scan Setup' },
     { key: 'Band Status', label: 'Band' },
     { key: 'ActionType', label: 'Action' },
     { key: 'RelVol', label: 'Rel Vol', num: true, tip: "Today's average volume so far vs. the previous full trading day's average" },
     { key: 'Week1Pct', label: 'Wk H/L', num: true, tip: '% beyond previous week high (green) or low (red)' },
-    { key: 'Week2Pct', label: '-2Wk H/L', num: true, tip: '% beyond the high/low from two weeks ago' },
   ];
 
   function sortValue(row, key) {
@@ -136,11 +133,21 @@
     return v === null || v === undefined ? -Infinity : v;
   }
 
+  // "RSI(n)" when every shown row used the same period (always true unless the setting was
+  // changed mid-run); plain "RSI" for a mix; the Scan Setup value when there are no rows yet.
+  function rsiHeaderLabel() {
+    const ps = new Set((S.rows || []).map(r => r.RSIPeriod).filter(p => p !== null && p !== undefined));
+    if (ps.size === 1) return `RSI(${[...ps][0]})`;
+    if (ps.size > 1) return 'RSI';
+    return `RSI(${$('#cfg-rsi').value || 14})`;
+  }
+
   function renderHead() {
     $('#thead-row').innerHTML = COLS.map(c => {
       const sorted = S.sortKey === c.key;
       const arrow = sorted ? (S.sortDir === 'asc' ? '↑' : '↓') : '↕';
-      return `<th data-key="${esc(c.key)}" class="${c.num ? 'num ' : ''}${sorted ? 'sorted' : ''}"${c.tip ? ` title="${esc(c.tip)}"` : ''}>${esc(c.label)}<span class="sort-arrow">${arrow}</span></th>`;
+      const label = c.key === 'RSI' ? rsiHeaderLabel() : c.label;
+      return `<th data-key="${esc(c.key)}" class="${c.num ? 'num ' : ''}${sorted ? 'sorted' : ''}"${c.tip ? ` title="${esc(c.tip)}"` : ''}>${esc(label)}<span class="sort-arrow">${arrow}</span></th>`;
     }).join('');
   }
 
@@ -168,12 +175,11 @@
       <td><a class="sym-link" href="${esc(url)}" target="_blank" rel="noopener">${esc(sym)}</a></td>
       <td class="num">${f2(r.LTP)}</td>
       <td class="num ${chg >= 0 ? 'positive' : 'negative'}">${chg >= 0 ? '+' : ''}${f2(chg)}%</td>
-      <td class="num">${f2(r['RSI(14)'])}</td>
+      <td class="num">${f2(r.RSI)}</td>
       <td><span class="badge ${above ? 'above' : 'below'}">${esc(r['Band Status'])}</span></td>
       <td>${actionPill(r.ActionType)}</td>
       <td class="num ${relVolClass(r.RelVol)}">${r.RelVol > 0 ? f2(r.RelVol) + '×' : '<span class="dim">–</span>'}</td>
       ${weekCell(r.Week1Pct)}
-      ${weekCell(r.Week2Pct)}
     </tr>`;
   }
 
@@ -294,6 +300,8 @@
     $('#cfg-lookback').value = cfg.lookback_days;
     $('#cfg-interval').value = cfg.scan_interval;
     $('#cfg-workers').value = cfg.workers;
+    $('#cfg-rsi').value = cfg.rsi_period;
+    $('#cfg-prevclose').checked = cfg.change_from_prev_close;
   }
 
   function renderState(s) {
@@ -360,6 +368,8 @@
       lookback_days: $('#cfg-lookback').value,
       scan_interval: $('#cfg-interval').value,
       workers: $('#cfg-workers').value,
+      rsi_period: $('#cfg-rsi').value,
+      change_from_prev_close: $('#cfg-prevclose').checked,
     };
   }
 
@@ -535,17 +545,13 @@
     const pct = (p) => p === null || p === undefined ? '–' : `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`;
     const pcls = (p) => p === null || p === undefined ? '' : (p >= 0 ? 'positive' : 'negative');
     $('#m-grid').innerHTML = [
-      m('RSI (14)', f2(row['RSI(14)'])),
+      m(`RSI (${row.RSIPeriod || 14})`, f2(row.RSI)),
       m('Rel Vol', row.RelVol > 0 ? `${f2(row.RelVol)}×` : '–', relVolClass(row.RelVol)),
       m('Scan #', row['Scan#']),
       m('Prev week high', lvl(row.PrevWeekHigh)),
       m('Prev week low', lvl(row.PrevWeekLow)),
       m('vs prev week', pct(row.Week1Pct), pcls(row.Week1Pct)),
       m('Week status', esc(row.WeekHL_Color)),
-      m('2-wk ago high', lvl(row.Prev2WeekHigh)),
-      m('2-wk ago low', lvl(row.Prev2WeekLow)),
-      m('vs 2-wk level', pct(row.Week2Pct), pcls(row.Week2Pct)),
-      m('2-wk status', esc(row.Week2HL_Color)),
     ].join('');
     $('#m-link').href = `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(String(row.Symbol).replace('.NS', ''))}&interval=${tv}`;
     $('#modal-overlay').classList.add('open');
@@ -638,12 +644,12 @@
     const types = [$('#cfg-1m').checked && '1m', $('#cfg-5m').checked && '5m', $('#cfg-60m').checked && '60m'].filter(Boolean).join(' + ') || 'no timeframe';
     const n = S.lastState ? S.lastState.symbols : 0;
     $('#setup-summary').textContent =
-      `${types} · lookback ${$('#cfg-lookback').value === '0' ? 'bands only' : $('#cfg-lookback').value + 'd'} · every ${$('#cfg-interval').value}s · ${n} symbols`;
+      `${types} · lookback ${$('#cfg-lookback').value === '0' ? 'bands only' : $('#cfg-lookback').value + 'd'} · RSI ${$('#cfg-rsi').value || 14} · Chg% ${$('#cfg-prevclose').checked ? 'vs prev close' : 'from open'} · every ${$('#cfg-interval').value}s · ${n} symbols`;
 
     const active = [
       $('#f-symbol').value.trim() !== '', $('#f-band').value !== 'All', $('#f-change-op').value !== 'none',
       $('#f-rsi-op').value !== 'none', $('#f-relvol-op').value !== 'none', $('#f-week1').value !== 'All',
-      $('#f-week2').value !== 'All', $('#f-from').value !== '' || $('#f-to').value !== '',
+      $('#f-from').value !== '' || $('#f-to').value !== '',
       selectedActions().length !== ACTIONS.length && selectedActions().length !== 0,
     ].filter(Boolean).length;
     $('#filters-summary').textContent = active ? `${active} filter${active === 1 ? '' : 's'} active` : 'no filters active';
@@ -663,7 +669,7 @@
   $$('.act-check, #act-all, #act-none').forEach(el => el.addEventListener('click', updateSummaries));
   // Scan Setup fields (not the stock-list controls) push live to the server when
   // a scan is already running, so changes apply from the next scan pass.
-  $$('#cfg-1m, #cfg-5m, #cfg-60m, #cfg-lookback, #cfg-interval, #cfg-workers').forEach(el =>
+  $$('#cfg-1m, #cfg-5m, #cfg-60m, #cfg-lookback, #cfg-interval, #cfg-workers, #cfg-rsi, #cfg-prevclose').forEach(el =>
     el.addEventListener('change', pushScanConfigIfRunning));
 
   // ------------------------------------------------------------- boot

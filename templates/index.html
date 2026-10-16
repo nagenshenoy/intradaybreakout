@@ -104,6 +104,14 @@
             <input type="number" id="cfg-interval" value="60" min="5" max="3600" step="5"></label>
           <label class="field" title="Parallel symbol fetches. 1 = sequential (safest for Yahoo rate limits)."><span>Parallel fetches</span>
             <input type="number" id="cfg-workers" value="1" min="1" max="8"></label>
+          <label class="field" title="RSI period (number of candles), 2 to 50. Default 14."><span>RSI period</span>
+            <input type="number" id="cfg-rsi" value="14" min="2" max="50" step="1"></label>
+        </div>
+
+        <div class="ctl-group">
+          <div class="ctl-title">Change% basis</div>
+          <label class="check" title="Ticked: Change% = move from the previous trading day's close. Unticked: move from today's opening price."><input type="checkbox" id="cfg-prevclose" checked> Change% vs previous day's close</label>
+          <div class="ctl-note">Unticked = from today's open</div>
         </div>
       </div>
     </div>
@@ -151,8 +159,6 @@
           </div></label>
         <label class="field" title="Price beyond the previous week's high (Green) or low (Red)"><span>Week H/L</span>
           <select id="f-week1"><option>All</option><option>Green</option><option>Red</option></select></label>
-        <label class="field" title="Price beyond the high (Green) or low (Red) from two weeks ago"><span>-2 Week H/L</span>
-          <select id="f-week2"><option>All</option><option>Green</option><option>Red</option></select></label>
         <div class="field"><span>Scan # range</span>
           <div class="inline">
             <input type="number" id="f-from" placeholder="from" class="narrow" min="1">
