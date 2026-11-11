@@ -68,13 +68,13 @@ def _num(x, default: float = 0.0) -> float:
 # --------------------------------------------------------------------------- #
 @dataclass
 class ScanConfig:
-    scan_1m: bool = False
-    scan_5m: bool = True
+    scan_1m: bool = True
+    scan_5m: bool = False
     scan_60m: bool = False
-    lookback_days: int = 2
-    scan_interval: int = 60
+    lookback_days: int = 1
+    scan_interval: int = 10
     workers: int = 1
-    rsi_period: int = 14
+    rsi_period: int = 2
     # True: Change% = move from the previous trading day's close (default).
     # False: Change% = move from today's opening price.
     change_from_prev_close: bool = True
@@ -99,8 +99,8 @@ class ScanConfig:
             return bool(v)
 
         return cls(
-            scan_1m=bool(d.get("scan_1m", False)),
-            scan_5m=bool(d.get("scan_5m", True)),
+            scan_1m=bool(d.get("scan_1m", True)),
+            scan_5m=bool(d.get("scan_5m", False)),
             scan_60m=bool(d.get("scan_60m", False)),
             lookback_days=clamp(d.get("lookback_days"), 0, 10, 2),  # 0 = Bollinger band only, no lookback comparison
             scan_interval=clamp(d.get("scan_interval"), 5, 3600, 60),
