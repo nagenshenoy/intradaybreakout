@@ -78,7 +78,6 @@
     p.set('rsi_val', $('#f-rsi-val').value);
     p.set('relvol_op', $('#f-relvol-op').value);
     p.set('relvol_val', $('#f-relvol-val').value);
-    p.set('week1', $('#f-week1').value);
     p.set('scan_from', $('#f-from').value);
     p.set('scan_to', $('#f-to').value);
     p.set('action_types', selectedActions().join(','));
@@ -102,7 +101,6 @@
     $('#f-rsi-val').value = '50';
     $('#f-relvol-op').value = 'none';
     $('#f-relvol-val').value = '1';
-    $('#f-week1').value = 'All';
     $('#f-from').value = '';
     $('#f-to').value = '';
     $$('.act-check').forEach(c => { c.checked = true; });
@@ -121,7 +119,7 @@
     { key: 'Band Status', label: 'Band' },
     { key: 'ActionType', label: 'Action' },
     { key: 'RelVol', label: 'Rel Vol', num: true, tip: "Today's average volume so far vs. the previous full trading day's average" },
-    { key: 'Week1Pct', label: 'Wk H/L', num: true, tip: '% beyond previous week high (green) or low (red)' },
+    { key: 'PrevDayHigh', label: 'Prev Day High', num: true, tip: "Previous trading day's high. Blinks and fades while it is still above the LTP (price hasn't crossed it)." },
   ];
 
   function sortValue(row, key) {
@@ -151,10 +149,12 @@
     }).join('');
   }
 
-  function weekCell(pct) {
-    if (pct === null || pct === undefined) return '<td class="num dim">–</td>';
-    const cls = pct >= 0 ? 'positive' : 'negative';
-    return `<td class="num ${cls}">${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</td>`;
+  // Previous day's high price. While it is above the LTP (not yet crossed) the value blinks and fades.
+  function prevHighCell(r) {
+    const h = r.PrevDayHigh;
+    if (h === null || h === undefined) return '<td class="num dim">–</td>';
+    const above = h > r.LTP;
+    return `<td class="num"><span class="pdh${above ? ' pdh-blink' : ''}"${above ? ' title="Above LTP"' : ''}>${f2(h)}</span></td>`;
   }
 
   function actionPill(a) {
@@ -179,7 +179,7 @@
       <td><span class="badge ${above ? 'above' : 'below'}">${esc(r['Band Status'])}</span></td>
       <td>${actionPill(r.ActionType)}</td>
       <td class="num ${relVolClass(r.RelVol)}">${r.RelVol > 0 ? f2(r.RelVol) + '×' : '<span class="dim">–</span>'}</td>
-      ${weekCell(r.Week1Pct)}
+      ${prevHighCell(r)}
     </tr>`;
   }
 
@@ -306,6 +306,10 @@
 
   function renderState(s) {
     S.lastState = s;
+    if (!S.sessionNoticed && s.session) {
+      S.sessionNoticed = true;
+      if (s.session.restored > 0) toast(`Restored ${s.session.restored} signals from the ${s.session.date} session`, 'ok');
+    }
     syncConfigOnce(s.config);
     if (S.scanning && !s.scanning && s.auto_stopped) {
       toast('Scan auto-stopped: market close (3:25 PM IST) reached', 'ok');
@@ -541,17 +545,14 @@
     const chg = row['Change%'];
     $('#m-change').innerHTML = `<span class="badge ${above ? 'above' : 'below'}">${esc(row['Band Status'])}</span> <span class="${chg >= 0 ? 'positive' : 'negative'}">${chg >= 0 ? '+' : ''}${f2(chg)}%</span>`;
     const m = (k, v, cls = '') => `<div class="metric"><div class="k">${esc(k)}</div><div class="v ${cls}">${v}</div></div>`;
-    const lvl = (v) => (v > 0 ? f2(v) : '–');
-    const pct = (p) => p === null || p === undefined ? '–' : `${p >= 0 ? '+' : ''}${p.toFixed(2)}%`;
-    const pcls = (p) => p === null || p === undefined ? '' : (p >= 0 ? 'positive' : 'negative');
+    const pdh = row.PrevDayHigh;
+    const hasPdh = pdh !== null && pdh !== undefined;
     $('#m-grid').innerHTML = [
       m(`RSI (${row.RSIPeriod || 14})`, f2(row.RSI)),
       m('Rel Vol', row.RelVol > 0 ? `${f2(row.RelVol)}×` : '–', relVolClass(row.RelVol)),
       m('Scan #', row['Scan#']),
-      m('Prev week high', lvl(row.PrevWeekHigh)),
-      m('Prev week low', lvl(row.PrevWeekLow)),
-      m('vs prev week', pct(row.Week1Pct), pcls(row.Week1Pct)),
-      m('Week status', esc(row.WeekHL_Color)),
+      m('Prev day high', hasPdh ? f2(pdh) : '–', hasPdh && pdh > row.LTP ? 'pdh-blink' : ''),
+      m('vs LTP', hasPdh ? (pdh > row.LTP ? 'Above LTP' : 'At / below LTP') : '–'),
     ].join('');
     $('#m-link').href = `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(String(row.Symbol).replace('.NS', ''))}&interval=${tv}`;
     $('#modal-overlay').classList.add('open');
@@ -648,7 +649,7 @@
 
     const active = [
       $('#f-symbol').value.trim() !== '', $('#f-band').value !== 'All', $('#f-change-op').value !== 'none',
-      $('#f-rsi-op').value !== 'none', $('#f-relvol-op').value !== 'none', $('#f-week1').value !== 'All',
+      $('#f-rsi-op').value !== 'none', $('#f-relvol-op').value !== 'none',
       $('#f-from').value !== '' || $('#f-to').value !== '',
       selectedActions().length !== ACTIONS.length && selectedActions().length !== 0,
     ].filter(Boolean).length;

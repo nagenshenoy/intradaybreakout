@@ -130,22 +130,26 @@ def test_no_breakout_returns_none():
     assert check_conditions(flat, "FLAT.NS", tab, CFG, make_fetcher({})) is None
 
 
-def test_weekly_levels_and_json_safe():
+def test_prev_day_high_and_json_safe():
     import json
     tab = ScanTab("5m")
-    up = calculate_indicators(intraday(last_move=+3.0))
+    raw = intraday(last_move=+3.0)
+    up = calculate_indicators(raw)
     r = check_conditions(up, "UP.NS", tab, CFG, make_fetcher({}))
-    # weekly(): previous week high=101, low=95 -> LTP ~103 is beyond the high => Green
-    assert r["WeekHL_Color"] == "Green" and r["Week1Pct"] > 0
+    last_day = up.index.date == up.index[-1].date()
+    prev_date = up.index.date[~last_day][-1]
+    expected = float(up[up.index.date == prev_date]["High"].max())
+    assert r["PrevDayHigh"] == pytest.approx(expected)       # highest High of the previous session
+    assert r["PrevDayHigh"] < r["LTP"]                       # +3% breakout is above it
     json.dumps(r, allow_nan=False)  # no NaN/inf anywhere
 
 
 def test_filters():
     rows = [
         {"id": 1, "Symbol": "AAA.NS", "Band Status": "Above Band", "RSI": 82.0, "Change%": 2.0,
-         "Scan#": 1, "ActionType": "New Signal", "RelVol": 2.5, "WeekHL_Color": "Green"},
+         "Scan#": 1, "ActionType": "New Signal", "RelVol": 2.5},
         {"id": 2, "Symbol": "BBB.NS", "Band Status": "Below Band", "RSI": 20.0, "Change%": -3.0,
-         "Scan#": 2, "ActionType": "Continue 1", "RelVol": 0.6, "WeekHL_Color": "Red"},
+         "Scan#": 2, "ActionType": "Continue 1", "RelVol": 0.6},
     ]
     f = lambda **kw: filter_results(rows, parse_filters(kw))  # noqa: E731
     assert len(f()) == 2
@@ -157,7 +161,6 @@ def test_filters():
     assert [r["id"] for r in f(relvol_op=">=", relvol_val="1")] == [1]
     assert [r["id"] for r in f(relvol_op="<", relvol_val="1")] == [2]
     assert [r["id"] for r in f(relvol_op="=", relvol_val="2.5")] == [1]
-    assert [r["id"] for r in f(week1="Red")] == [2]
     assert [r["id"] for r in f(scan_from="2")] == [2]
     assert [r["id"] for r in f(action_types="New Signal")] == [1]
     assert len(f(action_types="")) == 2            # nothing selected == no restriction
@@ -356,7 +359,7 @@ def test_api_end_to_end(client):
     exp = c.get("/api/export?tab=5m")
     assert exp.status_code == 200 and exp.mimetype == "text/csv"
     header = exp.get_data(as_text=True).splitlines()[0]
-    assert header.startswith("Scan#,Time,Symbol,LTP") and "Week1 %vsLevel" in header
+    assert header.startswith("Scan#,Time,Symbol,LTP") and "PrevDayHigh" in header
 
     c.post("/api/scan/stop")
     assert wait_until(lambda: not eng.scanning)
@@ -741,16 +744,209 @@ def test_rsi_period_flows_through_engine_filters_and_export(client):
     assert "RSI" in header and not any(h.startswith("RSI(") for h in header)
 
 
-def test_two_week_levels_are_gone():
-    r = check_conditions(calculate_indicators(intraday(last_move=+2.0)), "X.NS", ScanTab("5m"),
-                         ScanConfig(lookback_days=0), make_fetcher({}))
-    assert not any("2" in k and ("Week" in k or "Wk" in k) for k in r)
-    assert {"WeekHL_Color", "PrevWeekHigh", "PrevWeekLow", "Week1Pct"} <= set(r)   # 1-week data kept
+def test_weekly_levels_are_gone_and_prev_day_high_replaces_them():
+    def no_weekly(symbol, period, interval, **kw):
+        assert interval != "1wk", "weekly data should no longer be fetched"
+        return make_fetcher({"UP.NS": 2.0})(symbol, period, interval, **kw)
+
+    r = check_conditions(calculate_indicators(intraday(last_move=+2.0)), "UP.NS", ScanTab("5m"),
+                         ScanConfig(lookback_days=0), no_weekly)
+    assert not any(("Week" in k or "Wk" in k) for k in r)
+    assert "PrevDayHigh" in r
     from scanner import EXPORT_COLUMNS
     labels = " ".join(label for _, label in EXPORT_COLUMNS)
-    assert "Week2" not in labels and "Prev2" not in labels
-    assert "week2" not in parse_filters({"week2": "Green"})
-    # a stray week2 query param is simply ignored
+    assert "Week" not in labels and "PrevDayHigh" in labels
+    # stray week1/week2 query params are simply ignored
     rows = [{"Symbol": "A.NS", "Band Status": "Above Band", "RSI": 60.0, "Change%": 1.0, "Scan#": 1,
-             "ActionType": "New Signal", "RelVol": 1.0, "WeekHL_Color": "Black"}]
-    assert len(filter_results(rows, parse_filters({"week2": "Green"}))) == 1
+             "ActionType": "New Signal", "RelVol": 1.0, "PrevDayHigh": 100.0}]
+    assert len(filter_results(rows, parse_filters({"week1": "Green", "week2": "Red"}))) == 1
+
+
+@pytest.mark.parametrize("key", ["1m", "5m", "60m"])
+def test_prev_day_high_for_every_timeframe_and_export(key):
+    from scanner import results_to_csv
+    kw = TF_KW[key]
+    df = calculate_indicators(intraday(last_move=+2.0, **kw))
+    r = check_conditions(df, "X.NS", ScanTab(key), ScanConfig(lookback_days=0), make_fetcher({}))
+    prev = df[df.index.date == df.index.date[df.index.date < df.index[-1].date()][-1]]
+    assert r["PrevDayHigh"] == pytest.approx(float(prev["High"].max()))
+    csv = results_to_csv([{**r, "id": 1, "Scan#": 1, "Time": "10:00:00", "ActionType": "New Signal"}])
+    head, line = csv.splitlines()
+    assert head.split(",")[-1] == "PrevDayHigh"
+    assert float(line.split(",")[-1]) == pytest.approx(round(r["PrevDayHigh"], 2))
+
+
+def test_prev_day_high_is_none_without_an_earlier_session():
+    from scanner import results_to_csv
+    df = calculate_indicators(intraday(n_days=1, last_move=+3.0))
+    r = check_conditions(df, "X.NS", ScanTab("5m"), ScanConfig(lookback_days=0), make_fetcher({}))
+    assert r and r["PrevDayHigh"] is None
+    csv = results_to_csv([{**r, "id": 1, "Scan#": 1, "Time": "t", "ActionType": "New Signal"}])
+    assert csv.splitlines()[1].endswith(",")                  # blank cell, no crash
+
+
+# ------------------------------------------ JSON snapshot of the day's output ----
+import datetime as _dt                                              # noqa: E402
+from persistence import SessionStore, previous_trading_date, trading_date   # noqa: E402
+
+FRI, SAT, SUN, MON, TUE = (_dt.date(2026, 11, d) for d in (6, 7, 8, 9, 10))
+
+
+def _engine(path, day, moves=None, **kw):
+    return ScannerEngine(fetcher=make_fetcher(moves if moves is not None else {"UP.NS": 2.0, "DN.NS": -2.0}),
+                         store=SessionStore(path), date_fn=lambda: day, **kw)
+
+
+def _run_pass(eng, tab="5m"):
+    eng.set_symbols(["UP.NS", "DN.NS", "FLAT.NS"])
+    eng._begin_session()
+    eng._scan_tab(eng.tabs[tab], ScanConfig(lookback_days=0))
+
+
+def test_trading_date_weekend_belongs_to_friday():
+    assert [trading_date(d) for d in (FRI, SAT, SUN, MON)] == [FRI, FRI, FRI, MON]
+    assert [previous_trading_date(d) for d in (FRI, SAT, SUN, MON, TUE)] == \
+        [_dt.date(2026, 11, 5), _dt.date(2026, 11, 5), _dt.date(2026, 11, 5), FRI, MON]
+
+
+def test_store_roundtrip_atomic_and_tolerant(tmp_path):
+    import json
+    path = tmp_path / "sub" / "session.json"
+    st = SessionStore(path)
+    assert st.load() is None                                  # no file yet
+    st.save({"session_date": "2026-11-06", "x": float("nan"), "y": [1, 2.5, None]})
+    assert [p.name for p in path.parent.iterdir()] == ["session.json"]      # no temp file left behind
+    raw = json.loads(path.read_text())                                       # strictly valid JSON
+    assert raw["version"] == 1 and raw["x"] is None
+    assert st.load()["y"] == [1, 2.5, None]
+    path.write_text("{not json")
+    assert st.load() is None                                  # corrupt file is ignored, not fatal
+    path.write_text(json.dumps({"version": 999}))
+    assert st.load() is None                                  # unknown format ignored
+
+
+def test_snapshot_written_after_each_pass_and_restored_with_counters(tmp_path):
+    path = tmp_path / "session.json"
+    a = _engine(path, FRI)
+    _run_pass(a)
+    _run_pass(a)
+    assert path.exists()
+    b = _engine(path, FRI)                                    # "restart" on the same day
+    assert b.restored_rows == 4 and b.session_date == FRI
+    t = b.tabs["5m"]
+    assert t.scan_count == 2 and len(t.all_results) == 4
+    assert t.signal_tracker == a.tabs["5m"].signal_tracker
+    assert [x["scan_no"] for x in b.scan_list("5m")] == [2, 1]
+    # the new pass continues numbering (#3) and Continue-N counting, ids stay unique
+    b.set_symbols(["UP.NS", "DN.NS", "FLAT.NS"])
+    b._begin_session()
+    b._scan_tab(t, ScanConfig(lookback_days=0))
+    assert t.scan_count == 3
+    last = [r for r in t.all_results if r["Scan#"] == 3 and r["Symbol"] == "UP.NS"][0]
+    assert last["ActionType"] == "Continue 2"
+    ids = [r["id"] for r in t.all_results]
+    assert len(ids) == len(set(ids)) == 6
+    # all three timeframes are stored independently
+    _run_pass(b, "1m"); _run_pass(b, "60m")
+    c = _engine(path, FRI)
+    assert {k: len(x.all_results) for k, x in c.tabs.items()} == {"1m": 2, "5m": 6, "60m": 2}
+
+
+def test_fridays_data_is_kept_over_the_weekend(tmp_path):
+    path = tmp_path / "session.json"
+    _run_pass(_engine(path, FRI))
+    for day in (SAT, SUN):
+        e = _engine(path, day)
+        assert e.restored_rows >= 2 and e.session_date == FRI        # restored on startup
+        e.set_symbols(["UP.NS"])
+        assert e.start({"scan_5m": True, "scan_interval": 5})[0]      # starting a scan does NOT wipe
+        assert wait_until(lambda: e.tabs["5m"].scan_count >= 2)
+        e.stop(); assert wait_until(lambda: not e.scanning)
+        assert e.session_date == FRI
+        assert {r["Scan#"] for r in e.tabs["5m"].all_results} >= {1, 2}      # Friday's #1 still there
+        assert e.tabs["5m"].scan_count >= 2                                   # numbering continued
+
+
+def test_new_trading_day_wipes_only_when_a_scan_is_started(tmp_path):
+    path = tmp_path / "session.json"
+    _run_pass(_engine(path, FRI))
+    e = _engine(path, MON)                                    # Monday, before starting anything
+    assert e.restored_rows == 2 and len(e.tabs["5m"].all_results) == 2     # Friday still viewable
+    e.set_symbols(["UP.NS", "DN.NS", "FLAT.NS"])
+    assert e.start({"scan_5m": True, "scan_interval": 5})[0]  # ...wiped now that a new scan starts
+    assert wait_until(lambda: e.tabs["5m"].scan_count >= 1)
+    e.stop(); assert wait_until(lambda: not e.scanning)
+    assert e.session_date == MON
+    assert {r["Scan#"] for r in e.tabs["5m"].all_results} >= {1}
+    assert min(r["Scan#"] for r in e.tabs["5m"].all_results) == 1          # restarted from #1
+    saved = SessionStore(path).load()
+    assert saved["session_date"] == "2026-11-09"                           # file now holds Monday
+    assert all(x["Time"] for x in saved["tabs"]["5m"]["results"])
+
+
+def test_wipe_also_resets_scan_numbers_and_tracker(tmp_path):
+    e = _engine(tmp_path / "s.json", FRI)
+    _run_pass(e); _run_pass(e)
+    day = {"d": FRI}
+    e.date_fn = lambda: day["d"]
+    day["d"] = MON
+    e._begin_session()
+    assert all(t.scan_count == 0 and not t.all_results and not t.signal_tracker for t in e.tabs.values())
+    _run_pass(e)
+    assert [r["ActionType"] for r in e.tabs["5m"].all_results] == ["New Signal", "New Signal"]
+
+
+def test_stale_snapshot_is_not_restored(tmp_path):
+    path = tmp_path / "session.json"
+    _run_pass(_engine(path, FRI))
+    e = _engine(path, TUE)                                    # Tuesday: Friday is two trading days back
+    assert e.restored_rows == 0 and not e.tabs["5m"].all_results and e.session_date is None
+
+
+def test_clear_is_persisted(tmp_path):
+    path = tmp_path / "session.json"
+    a = _engine(path, FRI)
+    _run_pass(a); _run_pass(a, "60m")
+    a.clear("5m")
+    b = _engine(path, FRI)
+    assert not b.tabs["5m"].all_results and b.tabs["5m"].scan_count == 0
+    assert len(b.tabs["60m"].all_results) == 2                # other tabs untouched
+
+
+def test_restore_skips_malformed_rows_and_save_failure_does_not_stop_scanning(tmp_path):
+    import json
+    path = tmp_path / "session.json"
+    good = {"id": 7, "Symbol": "OK.NS", "Band Status": "Above Band", "Scan#": 3, "Time": "10:00:00",
+            "ActionType": "New Signal", "LTP": 1.0, "Change%": 1.0, "RSI": 60.0, "RelVol": 1.0}
+    path.write_text(json.dumps({"version": 1, "session_date": "2026-11-06", "seq": 2, "tabs": {
+        "5m": {"scan_count": 1, "signal_tracker": {"OK.NS_Above Band": 1, "bad": "x"},
+               "results": [good, {"id": "nope"}, "junk", {"Symbol": "no-id"}]},
+        "9m": {"results": [good]}}}))
+    e = _engine(path, FRI)
+    t = e.tabs["5m"]
+    assert [r["Symbol"] for r in t.all_results] == ["OK.NS"]
+    assert t.scan_count == 3 and t.signal_tracker == {"OK.NS_Above Band": 1}   # count >= highest Scan#
+    assert e._seq == 7                                                         # ids keep increasing
+
+    class Broken(SessionStore):
+        def save(self, payload):
+            raise OSError("disk full")
+    eng = ScannerEngine(fetcher=make_fetcher({"UP.NS": 2.0}), store=Broken(tmp_path / "x.json"), date_fn=lambda: FRI)
+    _run_pass(eng)
+    assert len(eng.tabs["5m"].all_results) == 1                                # scanning carried on
+    assert "disk full" in eng.snapshot()["session"]["error"]
+
+
+def test_api_exposes_session_and_restored_rows_work_with_filters_and_export(tmp_path):
+    path = tmp_path / "session.json"
+    _run_pass(_engine(path, FRI))
+    eng = _engine(path, SAT)
+    c = create_app(eng, bundled_path=Path("/nonexistent")).test_client()
+    st = c.get("/api/state").get_json()
+    assert st["session"] == {"date": "2026-11-06", "restored": 2, "persistence": True, "error": None}
+    res = c.get("/api/results?tab=5m&band=Above Band").get_json()
+    assert [r["Symbol"] for r in res["rows"]] == ["UP.NS"] and res["rows"][0]["PrevDayHigh"] > 0
+    exp = c.get("/api/export?tab=5m&symbol_format=plain").get_data(as_text=True)
+    assert "UP" in exp and exp.splitlines()[0].endswith("PrevDayHigh")
+    assert c.post("/api/clear", json={"tab": "5m"}).get_json()["ok"]
+    assert SessionStore(path).load()["tabs"]["5m"]["results"] == []             # API clear is persisted

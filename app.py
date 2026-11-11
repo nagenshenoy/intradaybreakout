@@ -16,10 +16,15 @@ from flask import Flask, Response, jsonify, render_template, request
 
 from scanner import (ACTION_TYPES, SYMBOL_FORMATS, TAB_DEFS, ScannerEngine, parse_filters,
                      results_to_csv)
+from persistence import SessionStore
 from sources import BundledWorkbook, UploadStore, parse_csv, parse_workbook, sheet_summary
 
 BASE_DIR = Path(__file__).resolve().parent
 BUNDLED_PATH = Path(os.environ.get("SCANNER_DATA", BASE_DIR / "data" / "ScannerData.xlsx"))
+
+# Where the day's scan output is kept between restarts (JSON, no database). On Render this
+# only survives restarts if it points at a Persistent Disk - see README.
+SESSION_FILE = Path(os.environ.get("SCANNER_SESSION_FILE", BASE_DIR / "data" / "session.json"))
 
 RESULT_LIMIT = 1000  # max rows sent to the browser per request (newest first)
 
@@ -27,7 +32,7 @@ RESULT_LIMIT = 1000  # max rows sent to the browser per request (newest first)
 def create_app(engine: ScannerEngine | None = None, bundled_path: Path | None = None) -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 5 * 1024 * 1024  # 5 MB upload cap
-    eng = engine or ScannerEngine()
+    eng = engine or ScannerEngine(store=SessionStore(SESSION_FILE))
     app.extensions["scanner"] = eng
     bundled = BundledWorkbook(bundled_path or BUNDLED_PATH)
     uploads = UploadStore()

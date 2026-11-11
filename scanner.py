@@ -22,6 +22,8 @@ import yfinance as yf
 from ta.momentum import RSIIndicator
 from ta.volatility import BollingerBands
 
+from persistence import SessionStore, previous_trading_date, trading_date
+
 log = logging.getLogger("scanner")
 
 ACTION_TYPES = ["New Signal"] + [f"Continue {i}" for i in range(1, 11)]
@@ -66,13 +68,13 @@ def _num(x, default: float = 0.0) -> float:
 # --------------------------------------------------------------------------- #
 @dataclass
 class ScanConfig:
-    scan_1m: bool = True
-    scan_5m: bool = False
+    scan_1m: bool = False
+    scan_5m: bool = True
     scan_60m: bool = False
-    lookback_days: int = 1
-    scan_interval: int = 10
+    lookback_days: int = 2
+    scan_interval: int = 60
     workers: int = 1
-    rsi_period: int = 2
+    rsi_period: int = 14
     # True: Change% = move from the previous trading day's close (default).
     # False: Change% = move from today's opening price.
     change_from_prev_close: bool = True
@@ -97,8 +99,8 @@ class ScanConfig:
             return bool(v)
 
         return cls(
-            scan_1m=bool(d.get("scan_1m", True)),
-            scan_5m=bool(d.get("scan_5m", False)),
+            scan_1m=bool(d.get("scan_1m", False)),
+            scan_5m=bool(d.get("scan_5m", True)),
             scan_60m=bool(d.get("scan_60m", False)),
             lookback_days=clamp(d.get("lookback_days"), 0, 10, 2),  # 0 = Bollinger band only, no lookback comparison
             scan_interval=clamp(d.get("scan_interval"), 5, 3600, 60),
@@ -144,40 +146,6 @@ def calculate_indicators(data: pd.DataFrame, rsi_period: int = 14) -> pd.DataFra
         return None
 
 
-def _weekly_levels(symbol, current_close, fetcher) -> dict:
-    """Previous-week high/low, and where LTP sits against them."""
-    out = dict(WeekHL_Color="Black", PrevWeekHigh=0.0, PrevWeekLow=0.0, Week1Pct=None)
-    try:
-        weekly = fetcher(symbol, period="3wk", interval="1wk", auto_adjust=False)
-    except Exception as e:  # noqa: BLE001
-        log.warning("weekly fetch failed for %s: %s", symbol, e)
-        return out
-    if weekly is None or weekly.empty:
-        return out
-
-    today = dt.date.today()
-    last_week_start = weekly.index[-1].date()
-    current_week_row = today.isocalendar()[:2] == last_week_start.isocalendar()[:2]
-
-    if current_week_row:
-        p1 = -2 if len(weekly) >= 2 else None
-    else:
-        p1 = -1 if len(weekly) >= 1 else None
-
-    if p1 is None:
-        return out
-    high = _num(weekly["High"].iloc[p1])
-    low = _num(weekly["Low"].iloc[p1])
-    if high > 0 and current_close > high:
-        color, pct = "Green", (current_close - high) / high * 100
-    elif low > 0 and current_close < low:
-        color, pct = "Red", (current_close - low) / low * 100
-    else:
-        color, pct = "Black", None
-    out.update(WeekHL_Color=color, PrevWeekHigh=high, PrevWeekLow=low, Week1Pct=pct)
-    return out
-
-
 def _rel_vol(data: pd.DataFrame, tab: ScanTab) -> float:
     """
     Rel Vol = (average volume of today's candles, 9:15 AM through the current
@@ -216,7 +184,7 @@ def check_conditions(data: pd.DataFrame, symbol: str, tab: ScanTab,
       Below Band: close < lower band AND close < lowest low of that window.
     With `lookback_days == 0` no lookback comparison is made at all: the signal is
     purely the Bollinger band test (close > upper band, or close < lower band).
-    On a hit, enrich with volume / RSI / weekly-level context.
+    On a hit, enrich with volume / RSI / previous-day-high context.
     """
     if data is None or len(data) < 2:
         return None
@@ -247,21 +215,28 @@ def check_conditions(data: pd.DataFrame, symbol: str, tab: ScanTab,
     if band_status is None:
         return None
 
+    # Prior sessions come from the same candles (no extra request per symbol).
+    last_date = data.index[-1].date()
+    session = data[data.index.date == last_date]
+    prior = data[data.index.date < last_date]
+
     # Change%: from the previous trading day's close (default), or from the open of the
     # latest session. If the data holds no earlier session (nothing to take a previous
     # close from), it falls back to the session open rather than showing nothing.
     change_pct = 0.0
-    last_date = data.index[-1].date()
-    session = data[data.index.date == last_date]
     base = 0.0
-    if cfg.change_from_prev_close:
-        prior = data[data.index.date < last_date]
-        if not prior.empty:
-            base = float(prior["Close"].iloc[-1])
+    if cfg.change_from_prev_close and not prior.empty:
+        base = float(prior["Close"].iloc[-1])
     if not base and not session.empty:
         base = float(session["Open"].iloc[0])
     if base:
         change_pct = (current_close - base) / base * 100
+
+    # Previous trading day's high: the highest High of the most recent earlier session.
+    prev_day_high = None
+    if not prior.empty:
+        prev_session = prior[prior.index.date == prior.index[-1].date()]
+        prev_day_high = _num(prev_session["High"].max(), default=None)
 
     result = {
         "Symbol": symbol,
@@ -271,8 +246,8 @@ def check_conditions(data: pd.DataFrame, symbol: str, tab: ScanTab,
         "RSIPeriod": int(data.attrs.get("rsi_period", cfg.rsi_period)),
         "Band Status": band_status,
         "RelVol": _num(_rel_vol(data, tab)),
+        "PrevDayHigh": prev_day_high,
     }
-    result.update(_weekly_levels(symbol, current_close, fetcher))
     return result
 
 
@@ -306,7 +281,6 @@ def parse_filters(args) -> dict:
         "rsi_val": fnum("rsi_val", 50.0),
         "relvol_op": args.get("relvol_op") or "none",
         "relvol_val": fnum("relvol_val", 1.0),
-        "week1": args.get("week1") or "All",
         "scan_from": fnum("scan_from"),
         "scan_to": fnum("scan_to"),
         "action_types": None,
@@ -338,8 +312,6 @@ def filter_results(results: list[dict], f: dict) -> list[dict]:
             continue
         if f["rsi_op"] == "lt" and not r["RSI"] < f["rsi_val"]:
             continue
-        if f["week1"] != "All" and r.get("WeekHL_Color") != f["week1"]:
-            continue
         if f["change_op"] in CHANGE_OPS and not CHANGE_OPS[f["change_op"]](r["Change%"], f["change_val"]):
             continue
         out.append(r)
@@ -350,8 +322,7 @@ EXPORT_COLUMNS = [
     ("Scan#", "Scan#"), ("Time", "Time"), ("Symbol", "Symbol"), ("LTP", "LTP"),
     ("Change%", "Change%"), ("RSI", "RSI"), ("Band Status", "Band Status"),
     ("ActionType", "ActionType"), ("RelVol", "RelVol"),
-    ("WeekHL_Color", "Week1 Status"), ("Week1Pct", "Week1 %vsLevel"),
-    ("PrevWeekHigh", "PrevWeekHigh"), ("PrevWeekLow", "PrevWeekLow"),
+    ("PrevDayHigh", "PrevDayHigh"),
 ]
 
 # Export-time symbol formats. Symbols are stored internally as Yahoo Finance
@@ -382,7 +353,7 @@ def results_to_csv(rows: list[dict], symbol_format: str = "ns") -> str:
     if "Symbol" in df.columns and not df.empty:
         df["Symbol"] = df["Symbol"].apply(lambda s: format_symbol(s, symbol_format))
     df.columns = labels
-    for col in ("LTP", "Change%", rsi_label, "RelVol", "Week1 %vsLevel", "PrevWeekHigh", "PrevWeekLow"):
+    for col in ("LTP", "Change%", rsi_label, "RelVol", "PrevDayHigh"):
         df[col] = df[col].astype(float).round(2)
     return df.to_csv(index=False)
 
@@ -396,9 +367,17 @@ def _idle_progress() -> dict:
 
 
 class ScannerEngine:
-    def __init__(self, fetcher=fetch_history, now_fn=lambda: dt.datetime.now(IST)):
+    def __init__(self, fetcher=fetch_history, now_fn=lambda: dt.datetime.now(IST),
+                 store: SessionStore | None = None,
+                 date_fn=lambda: dt.datetime.now(IST).date()):
         self.fetcher = fetcher
         self.now_fn = now_fn          # injectable clock, so tests can simulate 3:25 PM IST
+        self.date_fn = date_fn        # injectable calendar date (kept apart from now_fn)
+        self.store = store            # JSON snapshot of the day's output; None = in-memory only
+        self.session_date: dt.date | None = None   # trading date the current results belong to
+        self.restored_rows = 0
+        self.persist_error: str | None = None
+        self._persist_lock = threading.Lock()
         self.lock = threading.RLock()
         self.stock_list: list[str] = []
         self.file_name: str | None = None
@@ -414,6 +393,8 @@ class ScannerEngine:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._seq = 0
+        if self.store is not None:
+            self._restore()
 
     def _past_auto_stop(self) -> bool:
         """True at/after 3:25 PM IST - 5 minutes before the NSE close."""
@@ -437,6 +418,7 @@ class ScannerEngine:
             if not cfg.any_timeframe:
                 return False, "Please select at least one scan type (1m, 5m or 60m)."
             self.config = cfg
+            self._begin_session()
             self.scanning = True
             self.status = "Starting..."
             self.progress = _idle_progress()
@@ -448,6 +430,7 @@ class ScannerEngine:
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, daemon=True, name="scan-loop")
             self._thread.start()
+        self._persist()
         return True, "Scan started."
 
     def update_config(self, cfg_dict: dict) -> tuple[bool, str]:
@@ -473,6 +456,95 @@ class ScannerEngine:
     def clear(self, tab_key: str):
         with self.lock:
             self.tabs[tab_key].clear()
+        self._persist()
+
+    # ---- day session: JSON snapshot ------------------------------------- #
+    def _begin_session(self):
+        """Called when a scan is started. Output from an earlier trading date is wiped now
+        (not before), so yesterday's results stay viewable until the new scan begins.
+        Sat/Sun belong to Friday's session, so starting then keeps Friday's data."""
+        today = trading_date(self.date_fn())
+        if self.session_date is not None and self.session_date != today:
+            for t in self.tabs.values():
+                t.clear()
+            self.restored_rows = 0
+        self.session_date = today
+
+    def _persist(self):
+        """Write the snapshot (atomic). Never raises: a disk problem must not stop scanning."""
+        if self.store is None:
+            return
+        with self.lock:
+            if self.session_date is None:
+                return
+            payload = {
+                "session_date": self.session_date.isoformat(),
+                "saved_at": dt.datetime.now(IST).isoformat(timespec="seconds"),
+                "seq": self._seq,
+                "tabs": {k: {"scan_count": t.scan_count,
+                             "signal_tracker": dict(t.signal_tracker),
+                             "results": list(t.all_results)}
+                         for k, t in self.tabs.items()},
+            }
+        try:
+            with self._persist_lock:
+                self.store.save(payload)
+            self.persist_error = None
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not save session snapshot: %s", e)
+            self.persist_error = str(e)[:200]
+
+    def _restore(self):
+        """Load a saved snapshot if it belongs to the current or the previous trading date."""
+        data = self.store.load()
+        if not data:
+            return
+        try:
+            saved = dt.date.fromisoformat(str(data["session_date"]))
+        except (KeyError, ValueError):
+            return
+        today = self.date_fn()
+        if saved not in (trading_date(today), previous_trading_date(today)):
+            return
+        restored, max_id = 0, 0
+        for key, tab in self.tabs.items():
+            saved_tab = (data.get("tabs") or {}).get(key)
+            if not isinstance(saved_tab, dict):
+                continue
+            rows = []
+            for r in saved_tab.get("results") or []:
+                try:
+                    if not isinstance(r, dict):
+                        continue
+                    r = {**r, "id": int(r["id"]), "Scan#": int(r["Scan#"])}
+                    for need in ("Symbol", "Band Status", "Time", "ActionType"):
+                        if not isinstance(r.get(need), str):
+                            raise ValueError(need)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                rows.append(r)
+            tracker = {}
+            for k, v in (saved_tab.get("signal_tracker") or {}).items():
+                try:
+                    tracker[str(k)] = int(v)
+                except (TypeError, ValueError):
+                    pass
+            try:
+                count = int(saved_tab.get("scan_count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            tab.all_results = rows
+            tab.signal_tracker = tracker
+            tab.scan_count = max([count] + [r["Scan#"] for r in rows])
+            tab.version += 1
+            restored += len(rows)
+            max_id = max([max_id] + [r["id"] for r in rows])
+        try:
+            self._seq = max(int(data.get("seq") or 0), max_id)
+        except (TypeError, ValueError):
+            self._seq = max_id
+        self.session_date = saved
+        self.restored_rows = restored
 
     # ---- scan loop ------------------------------------------------------ #
     def _loop(self):
@@ -588,6 +660,7 @@ class ScannerEngine:
                 if self._stop.is_set():
                     break
                 work(sym)
+        self._persist()   # one snapshot per pass keeps the file current without per-signal writes
 
     # ---- read side ------------------------------------------------------ #
     def snapshot(self) -> dict:
@@ -600,6 +673,10 @@ class ScannerEngine:
                 "symbols": len(self.stock_list),
                 "file_name": self.file_name,
                 "config": self.config.__dict__.copy(),
+                "session": {"date": self.session_date.isoformat() if self.session_date else None,
+                            "restored": self.restored_rows,
+                            "persistence": self.store is not None,
+                            "error": self.persist_error},
                 "error_count": self.error_count,
                 "errors": list(self.errors)[-10:],
                 "tabs": {k: {"name": t.name, "scan_count": t.scan_count,

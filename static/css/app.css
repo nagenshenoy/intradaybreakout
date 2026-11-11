@@ -130,6 +130,10 @@ body.light .data-table tbody tr.row-positive:hover, body.light .data-table tbody
   .live-pill { max-width: 200px; }
   #results-table th:nth-child(n+10), #results-table td:nth-child(n+10) { display: none; }
 }
+/* Previous-day-high still above the LTP: blink and fade until price crosses it. */
+.pdh { font-variant-numeric: tabular-nums; }
+.pdh-blink { font-weight: 700; animation: pdhBlink 1.6s ease-in-out infinite; }
+@keyframes pdhBlink { 0%, 100% { opacity: 1; } 50% { opacity: 0.15; } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }

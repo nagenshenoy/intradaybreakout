@@ -10,4 +10,11 @@ services:
         value: 3.12.3
       - key: HOST
         value: 0.0.0.0
+    # To keep the day's scan output across restarts (session snapshot), attach a paid Persistent
+    # Disk and point the snapshot at it (a free service has an ephemeral disk):
+    #   disk:
+    #     name: scanner-data
+    #     mountPath: /var/data
+    #     sizeGB: 1
+    #   and add envVar:  SCANNER_SESSION_FILE = /var/data/session.json
     autoDeploy: true

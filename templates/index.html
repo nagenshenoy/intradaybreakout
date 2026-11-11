@@ -16,7 +16,7 @@
   <div class="header-inner">
     <div class="brand">
       <div class="brand-title">Intraday Breakout Scanner</div>
-      <div class="brand-tagline">Bollinger Band breakouts with RSI, volume and weekly-level context</div>
+      <div class="brand-tagline">Bollinger Band breakouts with RSI, volume and previous-day-high context</div>
     </div>
     <div class="header-meta">
       <button class="btn btn-primary btn-sm" id="start-btn" type="button">Start scan</button>
@@ -157,8 +157,6 @@
             <select id="f-relvol-op"><option value="none">No filter</option><option value=">">&gt;</option><option value=">=">&gt;=</option><option value="<">&lt;</option><option value="<=">&lt;=</option><option value="=">=</option></select>
             <input type="number" id="f-relvol-val" value="1" step="0.1" min="0" class="narrow">
           </div></label>
-        <label class="field" title="Price beyond the previous week's high (Green) or low (Red)"><span>Week H/L</span>
-          <select id="f-week1"><option>All</option><option>Green</option><option>Red</option></select></label>
         <div class="field"><span>Scan # range</span>
           <div class="inline">
             <input type="number" id="f-from" placeholder="from" class="narrow" min="1">

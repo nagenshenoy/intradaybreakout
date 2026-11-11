@@ -2,7 +2,7 @@
 
 A browser-based version of the original Tkinter `IntradayBreakout.py`. It scans a list of
 symbols on 5-minute and/or 60-minute candles and flags Bollinger Band breakouts, with RSI,
-volume and weekly-level context. The scan logic is unchanged; only the interface moved to the web.
+volume and previous-day-high context. The scan logic is unchanged; only the interface moved to the web.
 
 ## Quick start
 
@@ -65,7 +65,7 @@ Set `HOST` / `PORT` environment variables to change the bind address (default `1
 | RSI-extreme "RSI>XD" column | Removed, along with the RSI-lookback config option it depended on |
 | Flat, ever-growing results list | **Collapsible rows grouped by Scan#** (see below) |
 
-Signal rules, weekly (previous-week) high-low comparison, and the "New Signal / Continue N" tracking are the same as before.
+Signal rules and the "New Signal / Continue N" tracking are the same as before.
 
 ### Change% basis and RSI period (Scan Setup)
 
@@ -80,13 +80,50 @@ Both can be changed live like the other Scan Setup fields and apply from the nex
 the Change% basis, and only the RSI period is stored per row, so after a mid-run change, earlier and later
 Scan# groups were computed under different settings.
 
-The "-2 Week H/L" column, filter, modal fields and export columns have been removed; the one-week
-"Wk H/L" column and filter remain.
+The weekly "-2 Week H/L" and "Wk H/L" columns, their filters, popup fields and export columns have been
+removed (see **Prev Day High** below), and weekly data is no longer downloaded.
+
+### Prev Day High (replaces Wk H/L)
+
+The **Prev Day High** column shows the previous trading day's high price: the highest High among the
+candles of the most recent earlier session in the data already fetched for the scan (so it costs no extra
+request, and works the same on the 1m, 5m and 60m tabs). It shows `–` if the data holds no earlier session.
+
+While the value is **greater than the LTP** (price hasn't crossed yesterday's high yet) it **blinks and
+fades**; once the LTP is at or above it the value is steady. The comparison uses the LTP recorded in that
+row, i.e. at the time of the signal. The animation is switched off for users who have "reduce motion" set in
+their OS. `PrevDayHigh` is also an export column, and appears in the signal popup.
+
+### Session snapshot (no database)
+
+After every scan pass (and on Clear) the app writes the day's output to one JSON file:
+`data/session.json`, or the path in the `SCANNER_SESSION_FILE` environment variable. It holds each tab's
+signals, the Scan# counters and the New Signal / Continue N tracker, so a restart resumes exactly where it
+left off: tables, filters and exports are back, numbering continues (#67 follows #66) and Continue-N keeps
+counting. The write is atomic (temp file + rename), so a crash can't corrupt it. A failed write (for
+example a full disk) never stops scanning; it is reported in `/api/state` under `session.error`.
+
+- **Trading date:** the snapshot is tagged with its trading date. Saturday and Sunday count as the
+  **Friday** before, so Friday's output is kept over the weekend.
+- **On startup** it is restored if it belongs to the current or the previous trading date, so Monday morning
+  still shows Friday's signals. Anything older is ignored.
+- **Cleaning:** nothing is deleted at midnight. When you press **Start** on a different trading date than the
+  snapshot's, every tab is cleared (Scan# restart at 1) and the file is overwritten. Starting on a weekend
+  keeps Friday's data and continues its numbering. Press **Clear** to remove a tab's saved data earlier.
+- Scanning does not auto-resume after a restart; press Start.
+- NSE holidays aren't modelled, so a weekday holiday counts as a trading date.
+- Signals are saved once per pass, so a crash in the middle of a pass loses only that pass's signals.
+- Restored signals show a "Restored N signals" notice when the page loads.
+
+**Render:** a free web service has an ephemeral disk, so the file is lost on every restart, redeploy and
+spin-down. To keep it, attach a paid **Persistent Disk** (for example mounted at `/var/data`) and set
+`SCANNER_SESSION_FILE=/var/data/session.json`. Without one, the snapshot still works while the service
+stays up.
 
 ### 1-minute timeframe
 
 Tick **1 min scan** under Timeframes to add a 1 Minute tab alongside 5m and 60m. It uses the same rules,
-Rel Vol, weekly levels, Filters, Scan# grouping and CSV export as the other tabs, and the lookback setting
+Rel Vol, Prev Day High, Filters, Scan# grouping and CSV export as the other tabs, and the lookback setting
 (0 = bands only, 1-10 days) works identically. Passes run in the order 1m, 5m, 60m. It is off by default.
 
 Yahoo Finance only provides about 7 calendar days (roughly 5 trading days) of 1-minute data, so a
@@ -163,7 +200,7 @@ the server itself is running in - useful since most hosting platforms (including
   `datetime.date.today()`, which raised an error (and silently dropped every signal) on weekends and holidays.
 - **Errors don't kill the scan.** A failed fetch for one symbol is counted in the "Fetch errors" KPI and the
   scan carries on. The original would crash its scan thread.
-- **CSV export** has clean numeric columns (`Week1 %vsLevel`, `PrevWeekHigh`, ...). The original
+- **CSV export** has clean numeric columns (`PrevDayHigh`, ...). The original
   wrote a duplicated `LTP` column relabelled `WeekHigh/Low`.
 - **Duplicate symbols** are removed, and the header row is auto-detected instead of always being skipped, so a headerless list no longer loses its first symbol.
 - **Rel Vol** replaces the old High Volume flag with a real number, the **RSI>XD** column and its
@@ -177,6 +214,7 @@ the server itself is running in - useful since most hosting platforms (including
 
 ```
 app.py              Flask app + JSON API
+persistence.py      JSON session snapshot (atomic write, trading-date helpers)
 sources.py          Bundled workbook, uploads, header detection
 data/ScannerData.xlsx   Bundled watchlists (4 sheets)
 scanner.py          Scan engine (indicators, breakout rules, filters, background loop) - no Flask dependency
@@ -199,7 +237,7 @@ sample_symbols.csv
 | POST | `/api/scan/config` | Same JSON as `/api/scan/start`; updates settings for a scan already running, applied from the next scan pass |
 | POST | `/api/scan/stop` | Stop after the current symbol |
 | POST | `/api/clear` | JSON: `{"tab": "5m"}` |
-| GET | `/api/results` | Filtered rows, query: `tab, symbol, band, change_op, change_val, rsi_op, rsi_val, action_types, high_vol, week1, scan_from, scan_to` |
+| GET | `/api/results` | Filtered rows, query: `tab, symbol, band, change_op, change_val, rsi_op, rsi_val, action_types, high_vol, scan_from, scan_to` |
 | GET | `/api/scans` | Distinct Scan# values for a tab (`tab`), newest first, each with its time and signal count — powers the Export panel's Scan# dropdown |
 | GET | `/api/export` | Same query as `/api/results`, plus `symbol_format` (`ns` \| `plain` \| `nse`); returns CSV |
 
@@ -214,7 +252,8 @@ This package is ready to deploy on [Render](https://render.com) as a Web Service
    - **Build command**: `pip install -r requirements.txt`
    - **Start command**: `gunicorn -w 1 --threads 8 --timeout 120 -b 0.0.0.0:$PORT app:app`
 3. Render sets `$PORT` automatically; no other environment variables are required. `SCANNER_DATA` can be
-   set if you want to point at a different bundled workbook.
+   set if you want to point at a different bundled workbook, and `SCANNER_SESSION_FILE` to keep the session
+   snapshot on a Persistent Disk (see **Session snapshot**).
 
 Notes specific to hosting this app remotely:
 
